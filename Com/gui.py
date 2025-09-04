@@ -99,7 +99,7 @@ class App:
         self.preview = Label(left, width=PREVIEW_W, height=PREVIEW_H, bg="#222"); self.preview.pack()
         # 우: 컨트롤/스캔/프로그레스
         ctrl = Frame(right); ctrl.pack(fill="x")
-        self.pan=IntVar(value=0); self.tilt=IntVar(value=0)
+        self.pan=DoubleVar(value=0.0); self.tilt=DoubleVar(value=0.0)
         self.speed=IntVar(value=60); self.acc=DoubleVar(value=0.5); self.led=IntVar(value=0)  # 기본값 조정(체감 빠르게)
         self._row(ctrl, "Pan",  -180, 180, self.pan,  0)
         self._row(ctrl, "Tilt",  -30,  90, self.tilt, 1)
