@@ -50,8 +50,9 @@ def health():
 @app.post("/move")
 def move():
     d = request.get_json(force=True)
-    x   = clamp(int(d.get("pan", 0)),  PAN_MIN, PAN_MAX)
-    y   = clamp(int(d.get("tilt", 0)), TILT_MIN, TILT_MAX)
+    x = float(d.get("pan", 0)); y = float(d.get("tilt", 0))
+    x = max(PAN_MIN, min(PAN_MAX, x))
+    y = max(TILT_MIN, min(TILT_MAX, y))
     spd = max(0, int(d.get("speed", 0)))
     acc = max(0.0, float(d.get("acc", 0)))
     send_to_slave({"T":133, "X":x, "Y":y, "SPD":spd, "ACC":acc})
