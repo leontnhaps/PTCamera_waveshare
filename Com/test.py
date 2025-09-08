@@ -85,8 +85,13 @@ class App:
         self.ctrl = GuiCtrlClient(SERVER_HOST, GUI_CTRL_PORT); self.ctrl.start()
         self.img  = GuiImgClient (SERVER_HOST, GUI_IMG_PORT, DEFAULT_OUT_DIR); self.img.start()
 
+        # state
+        self.tkimg=None
+        self._resume_preview_after_snap = False
+
         # top bar
         top = Frame(root); top.pack(fill="x", padx=10, pady=6)
+        Button(top, text="한장 찍기 (Snap)", command=self.snap_one).pack(side="left", padx=(0,8))
         Button(top, text="출력 폴더", command=self.choose_outdir).pack(side="right")
 
         # preview fixed box
@@ -96,7 +101,6 @@ class App:
                                  bg="#111", highlightthickness=1, highlightbackground="#333")
         self.preview_box.pack(); self.preview_box.pack_propagate(False)
         self.preview = Label(self.preview_box, bg="#222"); self.preview.pack(fill="both", expand=True)
-        self.tkimg=None
 
         # bottom tabs
         nb = ttk.Notebook(root); nb.pack(fill="x", padx=10, pady=(6,10))
@@ -207,17 +211,37 @@ class App:
     def apply_move(self): self.ctrl.send({"cmd":"move","pan":float(self.mv_pan.get()),"tilt":float(self.mv_tilt.get()),
                                           "speed":self.mv_speed.get(),"acc":float(self.mv_acc.get())})
     def set_led(self): self.ctrl.send({"cmd":"led","value":int(self.led.get())})
+
     def toggle_preview(self):
         if self.preview_enable.get():
             self.ctrl.send({"cmd":"preview","enable": True, "width": self.preview_w.get(), "height": self.preview_h.get(),
                             "fps": self.preview_fps.get(), "quality": self.preview_q.get()})
         else:
             self.ctrl.send({"cmd":"preview","enable": False})
+
     def apply_preview_size(self):
         w = max(160, min(1280, self.preview_w.get()))
         h = max(120, min( 720, self.preview_h.get()))
         self.PREV_W, self.PREV_H = w, h
         self.preview_box.config(width=w, height=h)
+
+    # NEW: one-shot capture
+    def snap_one(self):
+        """프리뷰 잠깐 끄고 고해상도 1장 요청 → 수신 후 프리뷰 재개"""
+        self._resume_preview_after_snap = False
+        if self.preview_enable.get():
+            self.ctrl.send({"cmd":"preview","enable": False})
+            self._resume_preview_after_snap = True
+        fname = datetime.now().strftime("snap_%Y%m%d_%H%M%S.jpg")
+        self.ctrl.send({
+            "cmd":"snap",
+            "width":  self.width.get(),
+            "height": self.height.get(),
+            "quality":self.quality.get(),
+            "save":   fname,
+            "hard_stop": self.hard_stop.get()
+        })
+        # 수신은 IMG 스레드가 처리, saved 이벤트에서 프리뷰 재개
 
     # event loop
     def _poll(self):
@@ -227,11 +251,9 @@ class App:
                 if tag == "evt":
                     evt = payload; et = evt.get("event")
                     if et == "hello":
-                        # auto start preview if enabled and agent connected
                         if self.preview_enable.get() and evt.get("agent_state")=="connected":
                             self.toggle_preview()
                     elif et == "agent":
-                        # reconnect preview when agent connects
                         if evt.get("state")=="connected" and self.preview_enable.get():
                             self.toggle_preview()
                     elif et == "start":
@@ -245,7 +267,7 @@ class App:
                         if name: self.last_lbl.config(text=f"Last: {name}")
                     elif et == "done":
                         if self.preview_enable.get():
-                            self.toggle_preview()  # resume preview
+                            self.toggle_preview()  # resume preview for scan
                 elif tag == "preview":
                     self._set_preview(payload)
                 elif tag == "saved":
@@ -253,6 +275,10 @@ class App:
                     self.dl_lbl.config(text=f"DL {int(self.dl_lbl.cget('text').split()[-1])+1}")
                     self.last_lbl.config(text=f"Last: {name}")
                     self._set_preview(data)
+                    # snap 이후 자동 프리뷰 재개
+                    if self._resume_preview_after_snap:
+                        self._resume_preview_after_snap = False
+                        self.resume_preview()
                 elif tag == "toast":
                     print(payload)
         except queue.Empty:
