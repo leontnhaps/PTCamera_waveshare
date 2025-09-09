@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 # pc_gui.py — GUI client connecting to pc_server.py (not to Pi agent)
+
 import json, socket, struct, threading, queue, pathlib, io
 from datetime import datetime
 from tkinter import Tk, Label, Button, Scale, HORIZONTAL, IntVar, DoubleVar, Frame, Checkbutton, BooleanVar, filedialog
 from tkinter import ttk
 from PIL import Image, ImageTk
+
+# === NEW ===
+import numpy as np
+import cv2
 
 SERVER_HOST = "127.0.0.1"   # pc_server.py가 실행 중인 호스트
 GUI_CTRL_PORT = 7600        # pc_server.py의 GUI 포트
@@ -79,7 +84,7 @@ class App:
     def __init__(self, root: Tk):
         self.root = root
         root.title("Pan-Tilt Socket GUI (Client)")
-        root.geometry("980x760")
+        root.geometry("980x820")
 
         # connections
         self.ctrl = GuiCtrlClient(SERVER_HOST, GUI_CTRL_PORT); self.ctrl.start()
@@ -88,6 +93,26 @@ class App:
         # state
         self.tkimg=None
         self._resume_preview_after_snap = False
+
+        # === NEW: undistort state ===
+        self.ud_enable    = BooleanVar(value=False)   # 프리뷰 보정 on/off
+        self.ud_save_copy = BooleanVar(value=False)   # 저장시 보정본 추가 저장
+        self.ud_alpha     = DoubleVar(value=0.0)      # pinhole alpha / fisheye balance (0~1)
+
+        self._ud_model = None           # "pinhole" | "fisheye"
+        self._ud_K = self._ud_D = None  # np.ndarray(float32)
+        self._ud_img_size = None        # (Wc,Hc) — 캘리브 기준 해상도
+        self._ud_src_size = None        # 현재 맵 생성된 입력 프레임 크기 (w,h)
+        self._ud_m1 = self._ud_m2 = None  # remap map
+
+        # CUDA 경로(있으면 사용)
+        self._use_cuda = False
+        try:
+            self._use_cuda = hasattr(cv2, "cuda") and cv2.cuda.getCudaEnabledDeviceCount() > 0
+        except Exception:
+            self._use_cuda = False
+        self._ud_gm1 = self._ud_gm2 = None  # CUDA용 맵
+        self._gpu_tmp = None                # CUDA용 임시 버퍼
 
         # top bar
         top = Frame(root); top.pack(fill="x", padx=10, pady=6)
@@ -158,8 +183,77 @@ class App:
         Button(tab_misc, text="Apply Preview Size", command=self.apply_preview_size)\
             .grid(row=4,column=1,sticky="w",pady=4)
 
+        # === NEW: Undistort UI ===
+        row = 5
+        ttk.Separator(tab_misc, orient="horizontal").grid(row=row, column=0, columnspan=4, sticky="ew", pady=(8,6)); row+=1
+        Checkbutton(tab_misc, text="Undistort preview (use calib.npz)", variable=self.ud_enable)\
+            .grid(row=row, column=0, sticky="w"); row+=1
+        Button(tab_misc, text="Load calib.npz", command=self.load_npz)\
+            .grid(row=row, column=0, sticky="w", pady=2)
+        Checkbutton(tab_misc, text="Also save undistorted copy", variable=self.ud_save_copy)\
+            .grid(row=row, column=1, sticky="w", pady=2); row+=1
+        Label(tab_misc, text="Alpha/Balance (0~1)").grid(row=row, column=0, sticky="w")
+        Scale(tab_misc, from_=0.0, to=1.0, orient=HORIZONTAL, resolution=0.01, length=200,
+              variable=self.ud_alpha, command=lambda v: setattr(self, "_ud_src_size", None))\
+            .grid(row=row, column=1, sticky="w"); row+=1
+
         # loop
         self.root.after(60, self._poll)
+
+    # ========= Undistort helpers =========
+    def load_npz(self):
+        path = filedialog.askopenfilename(filetypes=[("NPZ","*.npz")])
+        if not path: return
+        cal = np.load(path, allow_pickle=True)
+        # 필수 키: model, K, D, img_size  (우리가 만든 npz와 동일)
+        self._ud_model = str(cal["model"])
+        self._ud_K = cal["K"].astype(np.float32)
+        self._ud_D = cal["D"].astype(np.float32)
+        self._ud_img_size = tuple(int(x) for x in cal["img_size"])
+        self._ud_src_size = None
+        self._ud_m1 = self._ud_m2 = None
+        self._ud_gm1 = self._ud_gm2 = None
+        print(f"[UD] loaded calib: model={self._ud_model}, img_size={self._ud_img_size}, cuda={self._use_cuda}")
+
+    def _scale_K(self, K, sx, sy):
+        K2 = K.copy()
+        K2[0,0]*=sx; K2[1,1]*=sy
+        K2[0,2]*=sx; K2[1,2]*=sy
+        K2[2,2]=1.0
+        return K2
+
+    def _ensure_ud_maps(self, w:int, h:int):
+        if self._ud_K is None or self._ud_D is None or self._ud_model is None:
+            return
+        if self._ud_src_size == (w,h) and self._ud_m1 is not None:
+            return
+        Wc,Hc = self._ud_img_size
+        sx, sy = w/float(Wc), h/float(Hc)
+        K = self._scale_K(self._ud_K, sx, sy)
+        D = self._ud_D
+        a = float(self.ud_alpha.get())
+
+        if self._ud_model == "pinhole":
+            newK, _ = cv2.getOptimalNewCameraMatrix(K, D, (w,h), alpha=a, newImgSize=(w,h))
+            m1,m2 = cv2.initUndistortRectifyMap(K, D, None, newK, (w,h), cv2.CV_16SC2)
+        else:  # fisheye
+            R = np.eye(3, dtype=np.float32)
+            newK = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
+                K, D, (w,h), R, balance=a, new_size=(w,h)
+            )
+            m1,m2 = cv2.fisheye.initUndistortRectifyMap(K, D, R, newK, (w,h), cv2.CV_16SC2)
+
+        self._ud_m1, self._ud_m2 = m1, m2
+        self._ud_src_size = (w,h)
+
+        # CUDA로도 준비(가능하면)
+        if self._use_cuda:
+            try:
+                self._ud_gm1 = cv2.cuda_GpuMat(); self._ud_gm1.upload(self._ud_m1)
+                self._ud_gm2 = cv2.cuda_GpuMat(); self._ud_gm2.upload(self._ud_m2)
+            except Exception as e:
+                print("[UD][CUDA] map upload failed:", e)
+                self._ud_gm1 = self._ud_gm2 = None
 
     # helpers
 
@@ -241,7 +335,6 @@ class App:
             "save":   fname,
             "hard_stop": self.hard_stop.get()
         })
-        # 수신은 IMG 스레드가 처리, saved 이벤트에서 프리뷰 재개
 
     # event loop
     def _poll(self):
@@ -275,6 +368,22 @@ class App:
                     self.dl_lbl.config(text=f"DL {int(self.dl_lbl.cget('text').split()[-1])+1}")
                     self.last_lbl.config(text=f"Last: {name}")
                     self._set_preview(data)
+
+                    # === NEW: 저장 시 보정본도 추가 저장 (옵션) ===
+                    if self.ud_save_copy.get() and self._ud_K is not None:
+                        try:
+                            arr = np.frombuffer(data, np.uint8)
+                            bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                            if bgr is not None:
+                                h,w = bgr.shape[:2]
+                                self._ensure_ud_maps(w,h)
+                                ubgr = cv2.remap(bgr, self._ud_m1, self._ud_m2, cv2.INTER_LINEAR)
+                                stem, dot, ext = name.partition(".")
+                                out = DEFAULT_OUT_DIR / f"{stem}_ud.{ext or 'jpg'}"
+                                cv2.imwrite(str(out), ubgr)
+                        except Exception as e:
+                            print("[save_ud] err:", e)
+
                     # snap 이후 자동 프리뷰 재개
                     if self._resume_preview_after_snap:
                         self._resume_preview_after_snap = False
@@ -286,13 +395,40 @@ class App:
         self.root.after(60, self._poll)
 
     def _set_preview(self, img_bytes: bytes):
+        """수신된 JPEG을 표시. (옵션) npz 기반 undistort 적용"""
         try:
-            im = Image.open(io.BytesIO(img_bytes))
+            arr = np.frombuffer(img_bytes, np.uint8)
+            bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if bgr is None: return
+
+            if self.ud_enable.get() and self._ud_K is not None:
+                h,w = bgr.shape[:2]
+                self._ensure_ud_maps(w,h)
+
+                if self._use_cuda and self._ud_gm1 is not None and self._ud_gm2 is not None:
+                    # CUDA 경로 (OpenCV CUDA가 있을 때만)
+                    try:
+                        if self._gpu_tmp is None or self._gpu_tmp.size() != (h, w):
+                            self._gpu_tmp = cv2.cuda_GpuMat(h, w, bgr.dtype.num)  # allocate once
+                        gsrc = cv2.cuda_GpuMat(); gsrc.upload(bgr)
+                        gout = cv2.cuda.remap(gsrc, self._ud_gm1, self._ud_gm2,
+                                              interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+                        bgr = gout.download()
+                    except Exception as e:
+                        # 오류시 CPU 경로로 폴백
+                        print("[preview][CUDA] remap failed, fallback CPU:", e)
+                        bgr = cv2.remap(bgr, self._ud_m1, self._ud_m2, cv2.INTER_LINEAR)
+                else:
+                    # CPU 경로
+                    bgr = cv2.remap(bgr, self._ud_m1, self._ud_m2, cv2.INTER_LINEAR)
+
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            im = Image.fromarray(rgb)
             im.thumbnail((self.PREV_W, self.PREV_H))
             self.tkimg = ImageTk.PhotoImage(im)
             self.preview.configure(image=self.tkimg)
-        except Exception:
-            pass
+        except Exception as e:
+            print("[preview] err:", e)
 
 def main():
     root = Tk()
