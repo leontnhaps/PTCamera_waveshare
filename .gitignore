@@ -206,7 +206,8 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
+/Com/*.jpg
+
 # 모든 폴더에서 JPG/JPEG 무시
 *.[jJ][pP][gG]
 *.[jJ][pP][eE][gG]
-
