@@ -7,12 +7,22 @@ from tkinter import Tk, Label, Button, Scale, HORIZONTAL, IntVar, DoubleVar, Fra
 from tkinter import ttk
 from PIL import Image, ImageTk
 
-# === NEW ===
 import numpy as np
 import cv2
 
-SERVER_HOST = "127.0.0.1"   # pc_server.py가 실행 중인 호스트
-GUI_CTRL_PORT = 7600        # pc_server.py의 GUI 포트
+# ==== [NEW] Optional PyTorch (for CUDA remap acceleration) ====
+try:
+    import torch
+    import torch.nn.functional as F
+    _TORCH_AVAILABLE = True
+except Exception:
+    torch = None
+    F = None
+    _TORCH_AVAILABLE = False
+# =============================================================
+
+SERVER_HOST = "127.0.0.1"
+GUI_CTRL_PORT = 7600
 GUI_IMG_PORT  = 7601
 
 DEFAULT_OUT_DIR = pathlib.Path(f"captures_gui_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
@@ -85,6 +95,7 @@ class App:
         self.root = root
         root.title("Pan-Tilt Socket GUI (Client)")
         root.geometry("980x820")
+        root.minsize(980, 820)  # 창 최소 크기 고정
 
         # connections
         self.ctrl = GuiCtrlClient(SERVER_HOST, GUI_CTRL_PORT); self.ctrl.start()
@@ -94,38 +105,55 @@ class App:
         self.tkimg=None
         self._resume_preview_after_snap = False
 
-        # === NEW: undistort state ===
-        self.ud_enable    = BooleanVar(value=False)   # 프리뷰 보정 on/off
-        self.ud_save_copy = BooleanVar(value=False)   # 저장시 보정본 추가 저장
-        self.ud_alpha     = DoubleVar(value=0.0)      # pinhole alpha / fisheye balance (0~1)
+        # undistort state
+        self.ud_enable    = BooleanVar(value=False)
+        self.ud_save_copy = BooleanVar(value=False)
+        self.ud_alpha     = DoubleVar(value=0.0)
 
-        self._ud_model = None           # "pinhole" | "fisheye"
-        self._ud_K = self._ud_D = None  # np.ndarray(float32)
-        self._ud_img_size = None        # (Wc,Hc) — 캘리브 기준 해상도
-        self._ud_src_size = None        # 현재 맵 생성된 입력 프레임 크기 (w,h)
-        self._ud_m1 = self._ud_m2 = None  # remap map
+        self._ud_model = None
+        self._ud_K = self._ud_D = None
+        self._ud_img_size = None
+        self._ud_src_size = None
+        self._ud_m1 = self._ud_m2 = None
 
-        # CUDA 경로(있으면 사용)
-        self._use_cuda = False
+        # cv2 CUDA 가능 여부
+        self._use_cv2_cuda = False
         try:
-            self._use_cuda = hasattr(cv2, "cuda") and cv2.cuda.getCudaEnabledDeviceCount() > 0
+            self._use_cv2_cuda = hasattr(cv2, "cuda") and cv2.cuda.getCudaEnabledDeviceCount() > 0
         except Exception:
-            self._use_cuda = False
-        self._ud_gm1 = self._ud_gm2 = None  # CUDA용 맵
-        self._gpu_tmp = None                # CUDA용 임시 버퍼
+            self._use_cv2_cuda = False
+        self._ud_gm1 = self._ud_gm2 = None
+
+        # ==== [NEW] Torch 가속 관련 멤버 ====
+        self._torch_available = _TORCH_AVAILABLE
+        self._torch_cuda = bool(_TORCH_AVAILABLE and torch.cuda.is_available())
+        self._torch_device = torch.device("cuda") if self._torch_cuda else torch.device("cpu") if _TORCH_AVAILABLE else None
+        # 미리보기/저장 용도는 FP16로 충분. 안전하게 FP32로 시작하고, 성능 더 뽑고 싶으면 True.
+        self._torch_use_fp16 = False
+        self._torch_dtype = (torch.float16 if (self._torch_cuda and self._torch_use_fp16) else torch.float32) if _TORCH_AVAILABLE else None
+
+        self._ud_torch_grid = None      # 1xHxWx2
+        self._ud_torch_grid_wh = None   # (w,h)
+        # ===================================
+
+        print(f"[INFO] cv2.cuda={self._use_cv2_cuda}, torch_cuda={self._torch_cuda}")
 
         # top bar
         top = Frame(root); top.pack(fill="x", padx=10, pady=6)
         Button(top, text="한장 찍기 (Snap)", command=self.snap_one).pack(side="left", padx=(0,8))
         Button(top, text="출력 폴더", command=self.choose_outdir).pack(side="right")
 
-        # preview fixed box
+        # ---------- 프리뷰: 고정 박스 + Label(place) 절대 크기 ----------
         center = Frame(root); center.pack(fill="x", padx=10)
         self.PREV_W, self.PREV_H = 800, 450
         self.preview_box = Frame(center, width=self.PREV_W, height=self.PREV_H,
                                  bg="#111", highlightthickness=1, highlightbackground="#333")
-        self.preview_box.pack(); self.preview_box.pack_propagate(False)
-        self.preview = Label(self.preview_box, bg="#222"); self.preview.pack(fill="both", expand=True)
+        self.preview_box.pack()
+        self.preview_box.pack_propagate(False)  # 자식 크기로 커지지 않게
+
+        self.preview_label = Label(self.preview_box, bg="#111")
+        self.preview_label.place(x=0, y=0, width=self.PREV_W, height=self.PREV_H)
+        # -------------------------------------------------------------------
 
         # bottom tabs
         nb = ttk.Notebook(root); nb.pack(fill="x", padx=10, pady=(6,10))
@@ -183,7 +211,6 @@ class App:
         Button(tab_misc, text="Apply Preview Size", command=self.apply_preview_size)\
             .grid(row=4,column=1,sticky="w",pady=4)
 
-        # === NEW: Undistort UI ===
         row = 5
         ttk.Separator(tab_misc, orient="horizontal").grid(row=row, column=0, columnspan=4, sticky="ew", pady=(8,6)); row+=1
         Checkbutton(tab_misc, text="Undistort preview (use calib.npz)", variable=self.ud_enable)\
@@ -197,7 +224,6 @@ class App:
               variable=self.ud_alpha, command=lambda v: setattr(self, "_ud_src_size", None))\
             .grid(row=row, column=1, sticky="w"); row+=1
 
-        # loop
         self.root.after(60, self._poll)
 
     # ========= Undistort helpers =========
@@ -205,7 +231,6 @@ class App:
         path = filedialog.askopenfilename(filetypes=[("NPZ","*.npz")])
         if not path: return
         cal = np.load(path, allow_pickle=True)
-        # 필수 키: model, K, D, img_size  (우리가 만든 npz와 동일)
         self._ud_model = str(cal["model"])
         self._ud_K = cal["K"].astype(np.float32)
         self._ud_D = cal["D"].astype(np.float32)
@@ -213,7 +238,9 @@ class App:
         self._ud_src_size = None
         self._ud_m1 = self._ud_m2 = None
         self._ud_gm1 = self._ud_gm2 = None
-        print(f"[UD] loaded calib: model={self._ud_model}, img_size={self._ud_img_size}, cuda={self._use_cuda}")
+        self._ud_torch_grid = None
+        self._ud_torch_grid_wh = None
+        print(f"[UD] loaded calib: model={self._ud_model}, img_size={self._ud_img_size}, cv2.cuda={self._use_cv2_cuda}, torch_cuda={self._torch_cuda}")
 
     def _scale_K(self, K, sx, sy):
         K2 = K.copy()
@@ -236,7 +263,7 @@ class App:
         if self._ud_model == "pinhole":
             newK, _ = cv2.getOptimalNewCameraMatrix(K, D, (w,h), alpha=a, newImgSize=(w,h))
             m1,m2 = cv2.initUndistortRectifyMap(K, D, None, newK, (w,h), cv2.CV_16SC2)
-        else:  # fisheye
+        else:
             R = np.eye(3, dtype=np.float32)
             newK = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
                 K, D, (w,h), R, balance=a, new_size=(w,h)
@@ -246,14 +273,73 @@ class App:
         self._ud_m1, self._ud_m2 = m1, m2
         self._ud_src_size = (w,h)
 
-        # CUDA로도 준비(가능하면)
-        if self._use_cuda:
+        # cv2.cuda 맵 업로드 (가능하면)
+        if self._use_cv2_cuda:
             try:
                 self._ud_gm1 = cv2.cuda_GpuMat(); self._ud_gm1.upload(self._ud_m1)
                 self._ud_gm2 = cv2.cuda_GpuMat(); self._ud_gm2.upload(self._ud_m2)
             except Exception as e:
-                print("[UD][CUDA] map upload failed:", e)
+                print("[UD][cv2.cuda] map upload failed:", e)
                 self._ud_gm1 = self._ud_gm2 = None
+
+        # [NEW] Torch grid 초기화 무효화 (재생성 필요)
+        self._ud_torch_grid = None
+        self._ud_torch_grid_wh = None
+
+    # [NEW] OpenCV 맵 -> Torch grid(-1~1 정규화)로 변환/캐시
+    def _ensure_torch_grid(self, w:int, h:int):
+        if not (self._torch_cuda and self._ud_m1 is not None):
+            return
+        if self._ud_torch_grid is not None and self._ud_torch_grid_wh == (w,h):
+            return
+
+        mx, my = cv2.convertMaps(self._ud_m1, self._ud_m2, cv2.CV_32F)  # HxW float32
+        H, W = mx.shape
+        gx = (mx / max(W-1,1)) * 2.0 - 1.0
+        gy = (my / max(H-1,1)) * 2.0 - 1.0
+        grid = np.stack([gx, gy], axis=-1)  # HxWx2
+
+        dtype = self._torch_dtype
+        dev   = self._torch_device
+        self._ud_torch_grid = torch.from_numpy(grid).unsqueeze(0).to(device=dev, dtype=dtype)
+        self._ud_torch_grid_wh = (w,h)
+
+    # [NEW] 단일 프레임 왜곡보정 (우선순위: Torch→cv2.cuda→CPU)
+    def _undistort_bgr(self, bgr: np.ndarray) -> np.ndarray:
+        h,w = bgr.shape[:2]
+        self._ensure_ud_maps(w,h)
+
+        # Torch CUDA 경로
+        if self._torch_cuda and self._ud_m1 is not None:
+            try:
+                self._ensure_torch_grid(w,h)
+                if self._ud_torch_grid is not None:
+                    # np -> torch (CHW, [0,1] float)
+                    t_cpu = torch.from_numpy(bgr).permute(2,0,1).contiguous()
+                    # pinned memory 전송(속도 미세 향상)
+                    try:
+                        t_cpu = t_cpu.pin_memory()
+                    except Exception:
+                        pass
+                    t = t_cpu.to(self._torch_device, dtype=self._torch_dtype, non_blocking=True).unsqueeze(0) / 255.0
+                    out = F.grid_sample(t, self._ud_torch_grid, mode="bilinear", align_corners=True)
+                    bgr = (out.squeeze(0).permute(1,2,0) * 255.0).clamp(0,255).byte().cpu().numpy()
+                    return bgr
+            except Exception as e:
+                print("[UD][torch] remap failed → fallback:", e)
+
+        # cv2 CUDA 경로
+        if self._use_cv2_cuda and self._ud_gm1 is not None and self._ud_gm2 is not None:
+            try:
+                gsrc = cv2.cuda_GpuMat(); gsrc.upload(bgr)
+                gout = cv2.cuda.remap(gsrc, self._ud_gm1, self._ud_gm2,
+                                      interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+                return gout.download()
+            except Exception as e:
+                print("[UD][cv2.cuda] remap failed → CPU:", e)
+
+        # CPU 경로
+        return cv2.remap(bgr, self._ud_m1, self._ud_m2, cv2.INTER_LINEAR)
 
     # helpers
 
@@ -314,14 +400,30 @@ class App:
             self.ctrl.send({"cmd":"preview","enable": False})
 
     def apply_preview_size(self):
-        w = max(160, min(1280, self.preview_w.get()))
-        h = max(120, min( 720, self.preview_h.get()))
-        self.PREV_W, self.PREV_H = w, h
-        self.preview_box.config(width=w, height=h)
+        # 1) 입력값 정리 (스트림 해상도만)
+        w = max(160, min(2592, self.preview_w.get()))
+        h = max(120,  min(1944, self.preview_h.get()))
+        self.preview_w.set(w); self.preview_h.set(h)
+
+        # 2) 창/프리뷰 박스 크기 절대 변경 금지 !!!
+
+        # 3) 토글과 동일하게 '중지→새 파라미터로 재시작'
+        if self.preview_enable.get():
+            self.ctrl.send({"cmd": "preview", "enable": False})
+            self.root.after(80, lambda: self.ctrl.send({
+                "cmd": "preview", "enable": True,
+                "width": w, "height": h,
+                "fps": self.preview_fps.get(),
+                "quality": self.preview_q.get(),
+            }))
+        else:
+            self.ctrl.send({"cmd": "preview", "enable": False,
+                            "width": w, "height": h,
+                            "fps": self.preview_fps.get(),
+                            "quality": self.preview_q.get()})
 
     # NEW: one-shot capture
     def snap_one(self):
-        """프리뷰 잠깐 끄고 고해상도 1장 요청 → 수신 후 프리뷰 재개"""
         self._resume_preview_after_snap = False
         if self.preview_enable.get():
             self.ctrl.send({"cmd":"preview","enable": False})
@@ -356,11 +458,11 @@ class App:
                     elif et == "progress":
                         done=int(evt.get("done",0)); total=int(evt.get("total",0))
                         self.prog.configure(value=done); self.prog_lbl.config(text=f"{done} / {total}")
-                        name = evt.get("name",""); 
+                        name = evt.get("name","")
                         if name: self.last_lbl.config(text=f"Last: {name}")
                     elif et == "done":
                         if self.preview_enable.get():
-                            self.toggle_preview()  # resume preview for scan
+                            self.toggle_preview()
                 elif tag == "preview":
                     self._set_preview(payload)
                 elif tag == "saved":
@@ -369,22 +471,18 @@ class App:
                     self.last_lbl.config(text=f"Last: {name}")
                     self._set_preview(data)
 
-                    # === NEW: 저장 시 보정본도 추가 저장 (옵션) ===
                     if self.ud_save_copy.get() and self._ud_K is not None:
                         try:
                             arr = np.frombuffer(data, np.uint8)
                             bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
                             if bgr is not None:
-                                h,w = bgr.shape[:2]
-                                self._ensure_ud_maps(w,h)
-                                ubgr = cv2.remap(bgr, self._ud_m1, self._ud_m2, cv2.INTER_LINEAR)
+                                ubgr = self._undistort_bgr(bgr)
                                 stem, dot, ext = name.partition(".")
                                 out = DEFAULT_OUT_DIR / f"{stem}_ud.{ext or 'jpg'}"
                                 cv2.imwrite(str(out), ubgr)
                         except Exception as e:
                             print("[save_ud] err:", e)
 
-                    # snap 이후 자동 프리뷰 재개
                     if self._resume_preview_after_snap:
                         self._resume_preview_after_snap = False
                         self.resume_preview()
@@ -394,39 +492,36 @@ class App:
             pass
         self.root.after(60, self._poll)
 
+    # ---------- 고정 박스 안에 '레터박스(contain)'로 그리기 ----------
+    def _draw_preview_to_label(self, pil_image: Image.Image):
+        W, H = int(self.PREV_W), int(self.PREV_H)
+        iw, ih = pil_image.size
+        if iw <= 0 or ih <= 0 or W <= 0 or H <= 0:
+            return
+        scale = min(W / iw, H / ih)
+        nw = max(1, int(round(iw * scale)))
+        nh = max(1, int(round(ih * scale)))
+        img = pil_image.resize((nw, nh), Image.LANCZOS)
+        bg = Image.new("RGB", (W, H), (17, 17, 17))
+        x = (W - nw) // 2
+        y = (H - nh) // 2
+        bg.paste(img, (x, y))
+        self.tkimg = ImageTk.PhotoImage(bg)
+        self.preview_label.configure(image=self.tkimg)
+    # -----------------------------------------------------------------------
+
     def _set_preview(self, img_bytes: bytes):
-        """수신된 JPEG을 표시. (옵션) npz 기반 undistort 적용"""
         try:
             arr = np.frombuffer(img_bytes, np.uint8)
             bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
             if bgr is None: return
 
             if self.ud_enable.get() and self._ud_K is not None:
-                h,w = bgr.shape[:2]
-                self._ensure_ud_maps(w,h)
-
-                if self._use_cuda and self._ud_gm1 is not None and self._ud_gm2 is not None:
-                    # CUDA 경로 (OpenCV CUDA가 있을 때만)
-                    try:
-                        if self._gpu_tmp is None or self._gpu_tmp.size() != (h, w):
-                            self._gpu_tmp = cv2.cuda_GpuMat(h, w, bgr.dtype.num)  # allocate once
-                        gsrc = cv2.cuda_GpuMat(); gsrc.upload(bgr)
-                        gout = cv2.cuda.remap(gsrc, self._ud_gm1, self._ud_gm2,
-                                              interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
-                        bgr = gout.download()
-                    except Exception as e:
-                        # 오류시 CPU 경로로 폴백
-                        print("[preview][CUDA] remap failed, fallback CPU:", e)
-                        bgr = cv2.remap(bgr, self._ud_m1, self._ud_m2, cv2.INTER_LINEAR)
-                else:
-                    # CPU 경로
-                    bgr = cv2.remap(bgr, self._ud_m1, self._ud_m2, cv2.INTER_LINEAR)
+                bgr = self._undistort_bgr(bgr)
 
             rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             im = Image.fromarray(rgb)
-            im.thumbnail((self.PREV_W, self.PREV_H))
-            self.tkimg = ImageTk.PhotoImage(im)
-            self.preview.configure(image=self.tkimg)
+            self._draw_preview_to_label(im)  # 레이아웃 불변
         except Exception as e:
             print("[preview] err:", e)
 
