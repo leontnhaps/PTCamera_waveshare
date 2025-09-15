@@ -1,6 +1,10 @@
 # PTCamera_waveshare
 control for https://www.waveshare.com/2-axis-pan-tilt-camera-module.htm 
 
+
+602 ip : 172.30.1.78
+711 ip : 
+
 할일
 1. 렌즈필터
 2. 전처리필터
