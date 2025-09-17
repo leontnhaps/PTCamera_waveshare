@@ -3,9 +3,10 @@
 
 import json, socket, struct, threading, queue, pathlib, io
 from datetime import datetime
-from tkinter import Tk, Label, Button, Scale, HORIZONTAL, IntVar, DoubleVar, Frame, Checkbutton, BooleanVar, filedialog
+from tkinter import Tk, Label, Button, Scale, HORIZONTAL, IntVar, DoubleVar, Frame, Checkbutton, BooleanVar, filedialog, StringVar
 from tkinter import ttk
 from PIL import Image, ImageTk
+import tkinter as tk  # ← 추가
 
 import numpy as np
 import cv2
@@ -20,6 +21,15 @@ except Exception:
     F = None
     _TORCH_AVAILABLE = False
 # =============================================================
+
+# ==== [NEW] Optional Ultralytics YOLO (GPU inference if available) ====
+try:
+    from ultralytics import YOLO
+    _YOLO_OK = True
+except Exception:
+    YOLO = None
+    _YOLO_OK = False
+# =====================================================================
 
 SERVER_HOST = "127.0.0.1"
 GUI_CTRL_PORT = 7600
@@ -89,6 +99,36 @@ class GuiImgClient(threading.Thread):
         except Exception as e:
             ui_q.put(("toast", f"IMG err: {e}"))
 
+class ScrollFrame(Frame):
+    def __init__(self, master, *args, **kwargs):
+        super().__init__(master, *args, **kwargs)
+        self.canvas = tk.Canvas(self, highlightthickness=0)
+        self.vsb = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.vsb.set)
+
+        self.vsb.pack(side="right", fill="y")
+        self.canvas.pack(side="left", fill="both", expand=True)
+
+        self.body = Frame(self.canvas)
+        self._win = self.canvas.create_window((0, 0), window=self.body, anchor="nw")
+
+        # 내용 바뀌면 스크롤영역 갱신
+        self.body.bind(
+            "<Configure>",
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        )
+        # 부모 크기 바뀌면 내부 프레임 폭 맞춤
+        self.canvas.bind(
+            "<Configure>",
+            lambda e: self.canvas.itemconfigure(self._win, width=e.width)
+        )
+        # 마우스 휠 스크롤
+        self.canvas.bind("<Enter>", lambda e: self.canvas.bind_all("<MouseWheel>", self._on_wheel))
+        self.canvas.bind("<Leave>", lambda e: self.canvas.unbind_all("<MouseWheel>"))
+
+    def _on_wheel(self, event):
+        self.canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+
 # ---- GUI ----
 class App:
     def __init__(self, root: Tk):
@@ -124,7 +164,7 @@ class App:
             self._use_cv2_cuda = False
         self._ud_gm1 = self._ud_gm2 = None
 
-        # ==== [NEW] Torch 가속 관련 멤버 ====
+        # ==== Torch 가속 관련 멤버 ====
         self._torch_available = _TORCH_AVAILABLE
         self._torch_cuda = bool(_TORCH_AVAILABLE and torch.cuda.is_available())
         self._torch_device = torch.device("cuda") if self._torch_cuda else torch.device("cpu") if _TORCH_AVAILABLE else None
@@ -136,7 +176,20 @@ class App:
         self._ud_torch_grid_wh = None   # (w,h)
         # ===================================
 
-        print(f"[INFO] cv2.cuda={self._use_cv2_cuda}, torch_cuda={self._torch_cuda}")
+        # ==== YOLO overlay state ====
+        self.yolo_enable = BooleanVar(value=False)
+        self.yolo_conf   = DoubleVar(value=0.25)
+        self.yolo_iou    = DoubleVar(value=0.55)
+        self.yolo_imgsz  = IntVar(value=832)     # 32배수 권장 (640/704/768/832/896/960 ...)
+        self.yolo_stride = IntVar(value=2)       # N프레임마다만 추론
+        self.yolo_wpath  = StringVar(value="")   # best.pt 경로
+
+        self._yolo_model   = None
+        self._yolo_last    = None   # (boxes, confs, clses) 캐시
+        self._yolo_idx     = 0
+        self._yolo_device  = (0 if (torch is not None and torch.cuda.is_available()) else "cpu")
+
+        print(f"[INFO] cv2.cuda={self._use_cv2_cuda}, torch_cuda={self._torch_cuda}, yolo_device={self._yolo_device}")
 
         # top bar
         top = Frame(root); top.pack(fill="x", padx=10, pady=6)
@@ -159,7 +212,7 @@ class App:
         nb = ttk.Notebook(root); nb.pack(fill="x", padx=10, pady=(6,10))
         tab_scan   = Frame(nb); nb.add(tab_scan, text="Scan")
         tab_manual = Frame(nb); nb.add(tab_manual, text="Manual / LED")
-        tab_misc   = Frame(nb); nb.add(tab_misc, text="Preview & Settings")
+        tab_misc = Frame(nb); nb.add(tab_misc, text="Preview & Settings")
 
         # scan params
         self.pan_min=IntVar(value=-180); self.pan_max=IntVar(value=180); self.pan_step=IntVar(value=15)
@@ -200,29 +253,64 @@ class App:
         Button(tab_manual, text="Set LED", command=self.set_led).grid(row=6,column=1,sticky="e",pady=4)
 
         # preview settings
+        misc_sf = ScrollFrame(tab_misc)
+        misc_sf.pack(fill="both", expand=True)
+        misc = misc_sf.body  # ← 앞으로 이걸 parent로 써요
+
         self.preview_enable=BooleanVar(value=True)
         self.preview_w=IntVar(value=640); self.preview_h=IntVar(value=360)
         self.preview_fps=IntVar(value=5); self.preview_q=IntVar(value=70)
-        Checkbutton(tab_misc, text="Live Preview", variable=self.preview_enable, command=self.toggle_preview)\
+
+        Checkbutton(misc, text="Live Preview", variable=self.preview_enable, command=self.toggle_preview)\
             .grid(row=0,column=0,sticky="w",pady=2)
-        self._row(tab_misc,1,"Preview w/h/-", self.preview_w, self.preview_h, None, ("W","H",""))
-        self._entry(tab_misc,2,"Preview fps", self.preview_fps)
-        self._entry(tab_misc,3,"Preview quality", self.preview_q)
-        Button(tab_misc, text="Apply Preview Size", command=self.apply_preview_size)\
+        self._row(misc,1,"Preview w/h/-", self.preview_w, self.preview_h, None, ("W","H",""))
+        self._entry(misc,2,"Preview fps", self.preview_fps)
+        self._entry(misc,3,"Preview quality", self.preview_q)
+        Button(misc, text="Apply Preview Size", command=self.apply_preview_size)\
             .grid(row=4,column=1,sticky="w",pady=4)
 
         row = 5
-        ttk.Separator(tab_misc, orient="horizontal").grid(row=row, column=0, columnspan=4, sticky="ew", pady=(8,6)); row+=1
-        Checkbutton(tab_misc, text="Undistort preview (use calib.npz)", variable=self.ud_enable)\
+        ttk.Separator(misc, orient="horizontal").grid(row=row, column=0, columnspan=4, sticky="ew", pady=(8,6)); row+=1
+        Checkbutton(misc, text="Undistort preview (use calib.npz)", variable=self.ud_enable)\
             .grid(row=row, column=0, sticky="w"); row+=1
-        Button(tab_misc, text="Load calib.npz", command=self.load_npz)\
+        Button(misc, text="Load calib.npz", command=self.load_npz)\
             .grid(row=row, column=0, sticky="w", pady=2)
-        Checkbutton(tab_misc, text="Also save undistorted copy", variable=self.ud_save_copy)\
+        Checkbutton(misc, text="Also save undistorted copy", variable=self.ud_save_copy)\
             .grid(row=row, column=1, sticky="w", pady=2); row+=1
-        Label(tab_misc, text="Alpha/Balance (0~1)").grid(row=row, column=0, sticky="w")
-        Scale(tab_misc, from_=0.0, to=1.0, orient=HORIZONTAL, resolution=0.01, length=200,
-              variable=self.ud_alpha, command=lambda v: setattr(self, "_ud_src_size", None))\
+        Label(misc, text="Alpha/Balance (0~1)").grid(row=row, column=0, sticky="w")
+        Scale(misc, from_=0.0, to=1.0, orient=HORIZONTAL, resolution=0.01, length=200,
+            variable=self.ud_alpha, command=lambda v: setattr(self, "_ud_src_size", None))\
             .grid(row=row, column=1, sticky="w"); row+=1
+
+        # ==== YOLO UI ====  ← 'tab_misc'가 아니라 'misc'를 parent로!
+        ttk.Separator(misc, orient="horizontal").grid(row=row, column=0, columnspan=4, sticky="ew", pady=(8,6)); row+=1
+
+        Checkbutton(
+            misc, text="YOLO overlay (preview에 결과 그리기)",
+            variable=self.yolo_enable, command=self._on_toggle_yolo
+        ).grid(row=row, column=0, sticky="w"); row+=1
+
+        Button(misc, text="Load YOLO weights (.pt)", command=self.load_yolo_weights)\
+            .grid(row=row, column=0, sticky="w", pady=2)
+
+        self.lbl_yolo_w = Label(misc, textvariable=self.yolo_wpath, anchor="w")
+        self.lbl_yolo_w.grid(row=row, column=1, columnspan=3, sticky="we"); row+=1
+
+        Label(misc, text="conf").grid(row=row, column=0, sticky="w")
+        ttk.Entry(misc, width=8, textvariable=self.yolo_conf).grid(row=row, column=1, sticky="w", padx=4)
+        Label(misc, text="iou").grid(row=row, column=2, sticky="w")
+        ttk.Entry(misc, width=8, textvariable=self.yolo_iou).grid(row=row, column=3, sticky="w", padx=4); row+=1
+
+        Label(misc, text="imgsz").grid(row=row, column=0, sticky="w")
+        ttk.Entry(misc, width=8, textvariable=self.yolo_imgsz).grid(row=row, column=1, sticky="w", padx=4)
+        Label(misc, text="stride(N프레임)").grid(row=row, column=2, sticky="w")
+        ttk.Entry(misc, width=8, textvariable=self.yolo_stride).grid(row=row, column=3, sticky="w", padx=4); row+=1
+
+        # (있으면) 이 줄도 추가해두면 너비 늘어날 때 경로 라벨이 자연스럽게 늘어남
+        for c in range(4):
+            misc.grid_columnconfigure(c, weight=1)
+
+        # ==================
 
         self.root.after(60, self._poll)
 
@@ -324,7 +412,7 @@ class App:
                     t = t_cpu.to(self._torch_device, dtype=self._torch_dtype, non_blocking=True).unsqueeze(0) / 255.0
                     out = F.grid_sample(t, self._ud_torch_grid, mode="bilinear", align_corners=True)
                     bgr = (out.squeeze(0).permute(1,2,0) * 255.0).clamp(0,255).byte().cpu().numpy()
-                    return bgr
+                    return np.ascontiguousarray(bgr)
             except Exception as e:
                 print("[UD][torch] remap failed → fallback:", e)
 
@@ -340,6 +428,83 @@ class App:
 
         # CPU 경로
         return cv2.remap(bgr, self._ud_m1, self._ud_m2, cv2.INTER_LINEAR)
+
+    # ===== YOLO helpers =====
+    def load_yolo_weights(self):
+        path = filedialog.askopenfilename(filetypes=[("PyTorch Weights","*.pt")])
+        if not path:
+            return
+        self.yolo_wpath.set(path)
+        self._yolo_model = None  # 다음 사용 시 재로드
+
+    def _on_toggle_yolo(self):
+        if self.yolo_enable.get():
+            ok = self._ensure_yolo_model()
+            if not ok:
+                self.yolo_enable.set(False)
+
+    def _ensure_yolo_model(self) -> bool:
+        if not _YOLO_OK:
+            ui_q.put(("toast", "Ultralytics가 설치되어 있지 않습니다: pip install ultralytics"))
+            return False
+        wpath = self.yolo_wpath.get().strip()
+        if not wpath:
+            ui_q.put(("toast", "YOLO 가중치(.pt)를 먼저 로드하세요."))
+            return False
+        if self._yolo_model is None:
+            try:
+                self._yolo_model = YOLO(wpath)
+                # 워밍업 (초기 지연 방지)
+                dummy = np.zeros((int(self.yolo_imgsz.get()), int(self.yolo_imgsz.get()), 3), dtype=np.uint8)
+                self._yolo_model.predict(dummy, imgsz=int(self.yolo_imgsz.get()),
+                                         conf=float(self.yolo_conf.get()),
+                                         iou=float(self.yolo_iou.get()),
+                                         device=self._yolo_device, verbose=False)
+                ui_q.put(("toast", f"YOLO ready: {wpath} (device={self._yolo_device})"))
+            except Exception as e:
+                self._yolo_model = None
+                ui_q.put(("toast", f"YOLO 로드 실패: {e}"))
+                return False
+        return True
+
+    def _run_yolo_and_draw(self, bgr: np.ndarray) -> np.ndarray:
+        """N프레임마다 추론, 매 프레임 박스는 덧그리기."""
+        if not self.yolo_enable.get():
+            self._yolo_last = None
+            return bgr
+        bgr = np.ascontiguousarray(bgr, dtype=np.uint8)
+        if not self._ensure_yolo_model():
+            return bgr
+
+        try:
+            N = max(1, int(self.yolo_stride.get()))
+            if (self._yolo_idx % N) == 0:
+                res = self._yolo_model.predict(
+                    bgr,
+                    imgsz=int(self.yolo_imgsz.get()),
+                    conf=float(self.yolo_conf.get()),
+                    iou=float(self.yolo_iou.get()),
+                    device=self._yolo_device,
+                    verbose=False
+                )[0]
+                if len(res.boxes) > 0:
+                    boxes = res.boxes.xyxy.detach().cpu().numpy().astype(int)
+                    confs = res.boxes.conf.detach().cpu().numpy()
+                    clses = res.boxes.cls.detach().cpu().numpy().astype(int)
+                    self._yolo_last = (boxes, confs, clses)
+                else:
+                    self._yolo_last = (np.empty((0,4), int), np.array([]), np.array([]))
+            # draw from cache
+            if self._yolo_last is not None:
+                boxes, confs, clses = self._yolo_last
+                for (x1,y1,x2,y2), c, k in zip(boxes, confs, clses):
+                    cv2.rectangle(bgr, (x1,y1), (x2,y2), (0,255,0), 2)
+                    cv2.putText(bgr, f"{c:.2f}", (x1, max(15,y1-6)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1, cv2.LINE_AA)
+            self._yolo_idx += 1
+        except Exception as e:
+            print("[YOLO] err:", e)
+        return bgr
 
     # helpers
 
@@ -518,6 +683,9 @@ class App:
 
             if self.ud_enable.get() and self._ud_K is not None:
                 bgr = self._undistort_bgr(bgr)
+
+            # YOLO overlay
+            bgr = self._run_yolo_and_draw(bgr)
 
             rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             im = Image.fromarray(rgb)
