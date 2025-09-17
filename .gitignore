@@ -217,3 +217,5 @@ __marimo__/
 # dataset 폴더와 그 모든 하위 폴더의 txt 파일을 무시합니다.
 # 예: dataset/labels.txt, dataset/train/data.txt 등
 dataset/**/*.txt
+
+dataset/**/*.pt
