@@ -211,3 +211,9 @@ __marimo__/
 # 모든 폴더에서 JPG/JPEG 무시
 *.[jJ][pP][gG]
 *.[jJ][pP][eE][gG]
+
+# ## dataset 폴더 내 .txt 파일 무시 ##
+
+# dataset 폴더와 그 모든 하위 폴더의 txt 파일을 무시합니다.
+# 예: dataset/labels.txt, dataset/train/data.txt 등
+dataset/**/*.txt
