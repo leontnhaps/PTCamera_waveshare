@@ -45,4 +45,4 @@ control for https://www.waveshare.com/2-axis-pan-tilt-camera-module.htm
 - 카메라선 해결
 
 - 좀더 가시성 좋게하기
-- 
+- 보내는거 문제가아니라 지금 찎는게 각도 바뀔때마다 안찎는거같은데 이제 이거 쓰레드 나눠야 되나싶기도하고 이부분 문제 다시생각하기
