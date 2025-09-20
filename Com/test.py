@@ -184,6 +184,11 @@ class App:
         self.yolo_stride = IntVar(value=2)       # N프레임마다만 추론
         self.yolo_wpath  = StringVar(value="")   # best.pt 경로
 
+        # [NEW] 가시성 옵션
+        self.yolo_box_thick = IntVar(value=4)      # ← 박스 테두리 두께
+        self.yolo_text_scale = DoubleVar(value=0.7) # ← 텍스트 스케일
+        self.yolo_text_thick = IntVar(value=2)      # ← 텍스트 두께
+
         self._yolo_model   = None
         self._yolo_last    = None   # (boxes, confs, clses) 캐시
         self._yolo_idx     = 0
@@ -305,6 +310,14 @@ class App:
         ttk.Entry(misc, width=8, textvariable=self.yolo_imgsz).grid(row=row, column=1, sticky="w", padx=4)
         Label(misc, text="stride(N프레임)").grid(row=row, column=2, sticky="w")
         ttk.Entry(misc, width=8, textvariable=self.yolo_stride).grid(row=row, column=3, sticky="w", padx=4); row+=1
+
+        # [NEW] 가시성 옵션 UI
+        Label(misc, text="box thickness").grid(row=row, column=0, sticky="w")
+        ttk.Entry(misc, width=8, textvariable=self.yolo_box_thick).grid(row=row, column=1, sticky="w", padx=4)
+        Label(misc, text="text scale").grid(row=row, column=2, sticky="w")
+        ttk.Entry(misc, width=8, textvariable=self.yolo_text_scale).grid(row=row, column=3, sticky="w", padx=4); row+=1
+        Label(misc, text="text thickness").grid(row=row, column=0, sticky="w")
+        ttk.Entry(misc, width=8, textvariable=self.yolo_text_thick).grid(row=row, column=1, sticky="w", padx=4); row+=1
 
         # (있으면) 이 줄도 추가해두면 너비 늘어날 때 경로 라벨이 자연스럽게 늘어남
         for c in range(4):
@@ -497,10 +510,17 @@ class App:
             # draw from cache
             if self._yolo_last is not None:
                 boxes, confs, clses = self._yolo_last
+                th = max(1, int(self.yolo_box_thick.get()))
+                ts = max(0.3, float(self.yolo_text_scale.get()))
+                tth = max(1, int(self.yolo_text_thick.get()))
                 for (x1,y1,x2,y2), c, k in zip(boxes, confs, clses):
-                    cv2.rectangle(bgr, (x1,y1), (x2,y2), (0,255,0), 2)
-                    cv2.putText(bgr, f"{c:.2f}", (x1, max(15,y1-6)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1, cv2.LINE_AA)
+                    # 박스(안티에일리어싱)
+                    cv2.rectangle(bgr, (x1,y1), (x2,y2), (0,255,0), th, lineType=cv2.LINE_AA)
+                    # 텍스트 배경 외곽선(검정) → 본문(초록) 2중 렌더
+                    label = f"{c:.2f}"
+                    org = (x1, max(15, y1-6))
+                    cv2.putText(bgr, label, org, cv2.FONT_HERSHEY_SIMPLEX, ts, (0,0,0), tth+2, cv2.LINE_AA)
+                    cv2.putText(bgr, label, org, cv2.FONT_HERSHEY_SIMPLEX, ts, (0,255,0), tth, cv2.LINE_AA)
             self._yolo_idx += 1
         except Exception as e:
             print("[YOLO] err:", e)
