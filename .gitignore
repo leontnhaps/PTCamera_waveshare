@@ -211,6 +211,7 @@ __marimo__/
 # 모든 폴더에서 JPG/JPEG 무시
 *.[jJ][pP][gG]
 *.[jJ][pP][eE][gG]
+*png
 
 # ## dataset 폴더 내 .txt 파일 무시 ##
 
