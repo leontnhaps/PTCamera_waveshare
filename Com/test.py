@@ -7,6 +7,7 @@ from tkinter import Tk, Label, Button, Scale, HORIZONTAL, IntVar, DoubleVar, Fra
 from tkinter import ttk
 from PIL import Image, ImageTk
 import tkinter as tk  # ← 추가
+import os, re, csv   # ← 추가
 
 import numpy as np
 import cv2
@@ -218,7 +219,9 @@ class App:
         tab_scan   = Frame(nb); nb.add(tab_scan, text="Scan")
         tab_manual = Frame(nb); nb.add(tab_manual, text="Manual / LED")
         tab_misc = Frame(nb); nb.add(tab_misc, text="Preview & Settings")
-
+        tab_point  = Frame(nb); nb.add(tab_point, text="Pointing")
+        
+        
         # scan params
         self.pan_min=IntVar(value=-180); self.pan_max=IntVar(value=180); self.pan_step=IntVar(value=15)
         self.tilt_min=IntVar(value=-30); self.tilt_max=IntVar(value=90);  self.tilt_step=IntVar(value=15)
@@ -244,6 +247,46 @@ class App:
         self.last_lbl = Label(ops, text="Last: -"); self.last_lbl.pack(side="left", padx=10)
         self.dl_lbl = Label(ops, text="DL 0"); self.dl_lbl.pack(side="left")
 
+        # ---- Pointing tab (CSV → 가중평균 타깃 → Move) ----
+        self.point_csv_path = StringVar(value="")
+        self.point_conf_min = DoubleVar(value=0.50)  # CSV 필터용
+        self.point_min_samples = IntVar(value=2)     # 각 선형피팅 최소 샘플 수
+        self.point_pan_target  = DoubleVar(value=0.0)
+        self.point_tilt_target = DoubleVar(value=0.0)
+        self.point_speed  = IntVar(value=self.speed.get())  # Scan 속도 기본 재사용
+        self.point_acc    = DoubleVar(value=self.acc.get())
+
+        Label(tab_point, text="CSV 경로").grid(row=0, column=0, sticky="w", padx=4, pady=4)
+        ttk.Entry(tab_point, width=52, textvariable=self.point_csv_path)\
+            .grid(row=0, column=1, columnspan=2, sticky="we", padx=4)
+        Button(tab_point, text="CSV 열기", command=self.pointing_choose_csv)\
+            .grid(row=0, column=3, sticky="e", padx=4)
+
+        Label(tab_point, text="conf≥").grid(row=1, column=0, sticky="e")
+        ttk.Entry(tab_point, width=8, textvariable=self.point_conf_min).grid(row=1, column=1, sticky="w")
+        Label(tab_point, text="min samples/fit").grid(row=1, column=2, sticky="e")
+        ttk.Entry(tab_point, width=8, textvariable=self.point_min_samples).grid(row=1, column=3, sticky="w")
+
+        Button(tab_point, text="가중평균 계산", command=self.pointing_compute)\
+            .grid(row=2, column=0, sticky="w", padx=4, pady=6)
+
+        Label(tab_point, text="pan target (deg)").grid(row=3, column=0, sticky="e")
+        ttk.Entry(tab_point, width=10, textvariable=self.point_pan_target, state="readonly")\
+            .grid(row=3, column=1, sticky="w")
+        Label(tab_point, text="tilt target (deg)").grid(row=3, column=2, sticky="e")
+        ttk.Entry(tab_point, width=10, textvariable=self.point_tilt_target, state="readonly")\
+            .grid(row=3, column=3, sticky="w")
+
+        Label(tab_point, text="Speed").grid(row=4, column=0, sticky="e")
+        ttk.Entry(tab_point, width=8, textvariable=self.point_speed).grid(row=4, column=1, sticky="w")
+        Label(tab_point, text="Accel").grid(row=4, column=2, sticky="e")
+        ttk.Entry(tab_point, width=8, textvariable=self.point_acc).grid(row=4, column=3, sticky="w")
+
+        Button(tab_point, text="Move to Target", command=self.pointing_move)\
+            .grid(row=5, column=0, columnspan=4, pady=8)
+
+        for c in range(4):
+            tab_point.grid_columnconfigure(c, weight=1)
         # manual tab
         self.mv_pan=DoubleVar(value=0.0); self.mv_tilt=DoubleVar(value=0.0)
         self.mv_speed=IntVar(value=100);  self.mv_acc=DoubleVar(value=1.0)
@@ -310,6 +353,14 @@ class App:
         ttk.Entry(misc, width=8, textvariable=self.yolo_imgsz).grid(row=row, column=1, sticky="w", padx=4)
         Label(misc, text="stride(N프레임)").grid(row=row, column=2, sticky="w")
         ttk.Entry(misc, width=8, textvariable=self.yolo_stride).grid(row=row, column=3, sticky="w", padx=4); row+=1
+        # YOLO UI 아래쪽 어딘가에 추가
+        self.yolo_show_centroid = BooleanVar(value=True)
+        self.yolo_show_center_cross = BooleanVar(value=True)
+
+        Checkbutton(misc, text="Show centroid dot (avg of detections)", 
+                    variable=self.yolo_show_centroid).grid(row=row, column=0, sticky="w"); row+=1
+        Checkbutton(misc, text="Show image center crosshair", 
+                    variable=self.yolo_show_center_cross).grid(row=row, column=0, sticky="w"); row+=1
 
         # [NEW] 가시성 옵션 UI
         Label(misc, text="box thickness").grid(row=row, column=0, sticky="w")
@@ -326,7 +377,86 @@ class App:
         # ==================
 
         self.root.after(60, self._poll)
+                # ===== [SCAN CSV 로깅 상태] =====
+        self._scan_csv_path = None
+        self._scan_csv_file = None
+        self._scan_csv_writer = None
 
+        # 파일명에서 pan/tilt 파싱 (예: img_t+00_p+001_....jpg)
+        self._fname_re = re.compile(r"img_t(?P<tilt>[+\-]\d{2,3})_p(?P<pan>[+\-]\d{2,3})_.*\.(jpg|jpeg|png)$", re.IGNORECASE)
+
+        # 스캔 중 YOLO 강제 적용(overlay와 무관)
+        self._scan_yolo_conf = 0.50   # 스캔용 conf (원하면 UI 변수와 같게 써도 OK)
+        self._scan_yolo_imgsz = 832   # 스캔용 imgsz
+
+        # === Pointing 좌표 로깅 상태 ===
+        self._pointing_log_fp = None
+        self._pointing_log_writer = None
+        self._pointing_logging = False
+
+        # (선택) 현재 명령 각도 기억
+        self._curr_pan = 0.0
+        self._curr_tilt = 0.0
+        
+        self._fits_h = {}
+        self._fits_v = {}
+        # Pointing 탭에 추가 UI
+        # centering state
+        self._centering_ok_frames = 0
+        self._centering_last_ms = 0
+
+        ttk.Separator(tab_point, orient="horizontal").grid(row=15, column=0, columnspan=4, sticky="ew", pady=(8,6))
+
+        self.centering_enable   = BooleanVar(value=False)
+        self.centering_px_tol   = IntVar(value=5)      # 중앙 판정 오차(px)
+        self.centering_min_frames = IntVar(value=4)    # 연속 N프레임 만족 시 종료
+        self.centering_max_step = DoubleVar(value=1.0) # 한번에 움직일 최대 각도(°)
+        self.centering_cooldown = IntVar(value=250)    # 명령 간 최소 간격(ms)
+
+        Checkbutton(tab_point, text="Centering mode (live refine)", variable=self.centering_enable)\
+            .grid(row=16, column=0, sticky="w")
+
+        Label(tab_point, text="px tol").grid(row=16, column=1, sticky="e")
+        ttk.Entry(tab_point, width=6, textvariable=self.centering_px_tol).grid(row=16, column=2, sticky="w")
+
+        Label(tab_point, text="max step(°)").grid(row=17, column=1, sticky="e")
+        ttk.Entry(tab_point, width=6, textvariable=self.centering_max_step).grid(row=17, column=2, sticky="w")
+
+        Label(tab_point, text="cooldown(ms)").grid(row=17, column=0, sticky="e")
+        ttk.Entry(tab_point, width=8, textvariable=self.centering_cooldown).grid(row=17, column=1, sticky="w")
+
+        Label(tab_point, text="stable frames").grid(row=17, column=3, sticky="e")
+        ttk.Entry(tab_point, width=6, textvariable=self.centering_min_frames).grid(row=17, column=3, sticky="w")
+
+        for c in range(4):
+            tab_point.grid_columnconfigure(c, weight=1)
+
+    def _ensure_yolo_model_for_scan(self) -> bool:
+        """스캔 중 CSV 기록용 YOLO 모델 준비(overlay 사용 여부와 무관)."""
+        # 이미 overlay에서 로드돼 있으면 재사용
+        if self._yolo_model is not None:
+            return True
+        # overlay가 꺼져 있어도 경로 지정돼 있으면 로드
+        wpath = self.yolo_wpath.get().strip()
+        if not _YOLO_OK or not wpath:
+            ui_q.put(("toast", "YOLO 가중치(.pt)을 로드하지 않아 CSV에 감지값을 기록할 수 없습니다."))
+            return False
+        try:
+            self._yolo_model = YOLO(wpath)
+            # 워밍업
+            dummy = np.zeros((self._scan_yolo_imgsz, self._scan_yolo_imgsz, 3), dtype=np.uint8)
+            self._yolo_model.predict(dummy, imgsz=self._scan_yolo_imgsz,
+                                     conf=self._scan_yolo_conf,
+                                     iou=float(self.yolo_iou.get()),
+                                     device=self._yolo_device, verbose=False)
+            return True
+        except Exception as e:
+            self._yolo_model = None
+            ui_q.put(("toast", f"[SCAN] YOLO 로드 실패: {e}"))
+            return False
+
+    
+    
     # ========= Undistort helpers =========
     def load_npz(self):
         path = filedialog.askopenfilename(filetypes=[("NPZ","*.npz")])
@@ -481,7 +611,7 @@ class App:
         return True
 
     def _run_yolo_and_draw(self, bgr: np.ndarray) -> np.ndarray:
-        """N프레임마다 추론, 매 프레임 박스는 덧그리기."""
+        """N프레임마다 추론, 매 프레임 박스 + 평균점(centroid) 그리기."""
         if not self.yolo_enable.get():
             self._yolo_last = None
             return bgr
@@ -491,7 +621,9 @@ class App:
 
         try:
             N = max(1, int(self.yolo_stride.get()))
-            if (self._yolo_idx % N) == 0:
+            run_infer = (self._yolo_idx % N) == 0
+
+            if run_infer:
                 res = self._yolo_model.predict(
                     bgr,
                     imgsz=int(self.yolo_imgsz.get()),
@@ -507,24 +639,74 @@ class App:
                     self._yolo_last = (boxes, confs, clses)
                 else:
                     self._yolo_last = (np.empty((0,4), int), np.array([]), np.array([]))
+
             # draw from cache
             if self._yolo_last is not None:
                 boxes, confs, clses = self._yolo_last
                 th = max(1, int(self.yolo_box_thick.get()))
                 ts = max(0.3, float(self.yolo_text_scale.get()))
                 tth = max(1, int(self.yolo_text_thick.get()))
+
+                H, W = bgr.shape[:2]
+
+                # 1) 박스들 렌더
                 for (x1,y1,x2,y2), c, k in zip(boxes, confs, clses):
-                    # 박스(안티에일리어싱)
                     cv2.rectangle(bgr, (x1,y1), (x2,y2), (0,255,0), th, lineType=cv2.LINE_AA)
-                    # 텍스트 배경 외곽선(검정) → 본문(초록) 2중 렌더
                     label = f"{c:.2f}"
                     org = (x1, max(15, y1-6))
                     cv2.putText(bgr, label, org, cv2.FONT_HERSHEY_SIMPLEX, ts, (0,0,0), tth+2, cv2.LINE_AA)
-                    cv2.putText(bgr, label, org, cv2.FONT_HERSHEY_SIMPLEX, ts, (0,255,0), tth, cv2.LINE_AA)
+                    cv2.putText(bgr, label, org, cv2.FONT_HERSHEY_SIMPLEX, ts, (0,255,0), tth,   cv2.LINE_AA)
+
+                # 2) (옵션) 화면 중앙 십자
+                if getattr(self, "yolo_show_center_cross", True) and self.yolo_show_center_cross.get():
+                    cx0, cy0 = int(W/2), int(H/2)
+                    cv2.drawMarker(bgr, (cx0, cy0), (255,255,255), markerType=cv2.MARKER_CROSS, 
+                                markerSize=14, thickness=1, line_type=cv2.LINE_AA)
+
+                # 3) (옵션) 검출들의 중심점 평균(centroid) 그리기
+                if getattr(self, "yolo_show_centroid", True) and self.yolo_show_centroid.get():
+                    # conf 필터는 이미 predict에 들어가 있으므로 전체 사용
+                    if boxes.shape[0] > 0:
+                        centers = []
+                        for (x1,y1,x2,y2) in boxes:
+                            cx = 0.5*(x1+x2); cy = 0.5*(y1+y2)
+                            centers.append((cx, cy))
+                        # 평균
+                        m_cx = float(np.mean([c[0] for c in centers]))
+                        m_cy = float(np.mean([c[1] for c in centers]))
+
+                        # 점/원 + 텍스트
+                        cv2.circle(bgr, (int(round(m_cx)), int(round(m_cy))), 5, (0,200,255), -1, lineType=cv2.LINE_AA)
+                        err_x = (W/2.0 - m_cx); err_y = (H/2.0 - m_cy)
+                        self._centering_on_centroid(m_cx, m_cy, W, H)
+                        if self._pointing_logging and (self._pointing_log_writer is not None):
+                            from datetime import datetime
+                            try:
+                                self._pointing_log_writer.writerow([
+                                    datetime.now().isoformat(timespec="milliseconds"),
+                                    f"{self._curr_pan:.3f}", f"{self._curr_tilt:.3f}",
+                                    f"{m_cx:.3f}", f"{m_cy:.3f}",
+                                    f"{err_x:.3f}", f"{err_y:.3f}",
+                                    int(W), int(H),
+                                    int(boxes.shape[0])
+                                ])
+                                # 즉시 파일에 내리고 싶으면 다음 줄 주석 해제
+                                # self._pointing_log_fp.flush()
+                            except Exception as e:
+                                print("[Point] write err:", e)
+                        txt = f"mean ({m_cx:.1f},{m_cy:.1f})  err ({err_x:+.1f},{err_y:+.1f}) px"
+                        # 텍스트 배경
+                        cv2.putText(bgr, txt, (10, max(20, H-15)), cv2.FONT_HERSHEY_SIMPLEX, 
+                                    0.55, (0,0,0), 3, cv2.LINE_AA)
+                        cv2.putText(bgr, txt, (10, max(20, H-15)), cv2.FONT_HERSHEY_SIMPLEX, 
+                                    0.55, (0,255,255), 1, cv2.LINE_AA)
+                        
+
             self._yolo_idx += 1
         except Exception as e:
             print("[YOLO] err:", e)
         return bgr
+
 
     # helpers
 
@@ -560,6 +742,10 @@ class App:
 
     # actions
     def start_scan(self):
+    # 보정 강제: calib.npz가 로드되지 않았으면 스캔 시작 금지
+        if self._ud_K is None or self._ud_D is None:
+            ui_q.put(("toast", "❌ 스캔은 보정 이미지만 허용합니다. 먼저 'Load calib.npz'를 해주세요."))
+            return
         if self.preview_enable.get():
             self.ctrl.send({"cmd":"preview","enable": False})
         self.ctrl.send({
@@ -633,9 +819,25 @@ class App:
                     if et == "hello":
                         if self.preview_enable.get() and evt.get("agent_state")=="connected":
                             self.toggle_preview()
-                    elif et == "agent":
-                        if evt.get("state")=="connected" and self.preview_enable.get():
-                            self.toggle_preview()
+                    elif et == "start":
+                        total = int(evt.get("total",0))
+                        self.prog.configure(maximum=max(1,total), value=0)
+                        self.prog_lbl.config(text=f"0 / {total}"); self.dl_lbl.config(text="DL 0"); self.last_lbl.config(text="Last: -")
+
+                        # === CSV 오픈 ===
+                        # 서버에서 session을 내려주면 쓰고, 없으면 타임스탬프
+                        sess = evt.get("session") or datetime.now().strftime("scan_%Y%m%d_%H%M%S")
+                        self._scan_csv_path = DEFAULT_OUT_DIR / f"{sess}_detections.csv"
+                        try:
+                            self._scan_csv_file = open(self._scan_csv_path, "w", newline="", encoding="utf-8")
+                            self._scan_csv_writer = csv.writer(self._scan_csv_file)
+                            self._scan_csv_writer.writerow(["file","pan_deg","tilt_deg","cx","cy","w","h","conf","cls","W","H"])
+                            print(f"[SCAN] CSV → {self._scan_csv_path}")
+                        except Exception as e:
+                            self._scan_csv_file = None
+                            self._scan_csv_writer = None
+                            ui_q.put(("toast", f"CSV 오픈 실패: {e}"))
+
                     elif et == "start":
                         total = int(evt.get("total",0))
                         self.prog.configure(maximum=max(1,total), value=0)
@@ -646,8 +848,20 @@ class App:
                         name = evt.get("name","")
                         if name: self.last_lbl.config(text=f"Last: {name}")
                     elif et == "done":
+                        # === CSV 닫기 ===
+                        if self._scan_csv_file:
+                            try:
+                                self._scan_csv_file.flush()
+                                self._scan_csv_file.close()
+                            except Exception:
+                                pass
+                            finally:
+                                self._scan_csv_file = None
+                                self._scan_csv_writer = None
+                                ui_q.put(("toast", f"CSV 저장 완료: {self._scan_csv_path}"))
                         if self.preview_enable.get():
                             self.toggle_preview()
+
                 elif tag == "preview":
                     self._set_preview(payload)
                 elif tag == "saved":
@@ -667,10 +881,55 @@ class App:
                                 cv2.imwrite(str(out), ubgr)
                         except Exception as e:
                             print("[save_ud] err:", e)
+                    # === [핵심] 스캔 중 CSV에 YOLO 결과 기록 ===
+                    if self._scan_csv_writer is not None:
+                            try:
+                                # 파일명에서 pan/tilt 추출
+                                m = self._fname_re.search(name)
+                                pan_deg = float(m.group("pan")) if m else None
+                                tilt_deg = float(m.group("tilt")) if m else None
 
+                                # 원본 디코드
+                                arr = np.frombuffer(data, np.uint8)
+                                bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                                if bgr is None:
+                                    raise RuntimeError("cv2.imdecode 실패")
+
+                                # ★★★ 스캔 CSV/YOLO는 '항상 보정' ★★★
+                                if self._ud_K is None or self._ud_D is None:
+                                    # 안전장치: 혹시 start_scan 체크를 우회했을 때 대비
+                                    ui_q.put(("toast", "❌ 보정 파라미터 없음 → 스캔 감지/기록 중단"))
+                                    return
+                                bgr = self._undistort_bgr(bgr)   # ← 여기서 반드시 언디스토트
+                                H, W = bgr.shape[:2]             # ← 보정 이후의 W,H로 교체
+
+                                # YOLO 보장 & 추론
+                                if self._ensure_yolo_model_for_scan():
+                                    res = self._yolo_model.predict(
+                                        bgr,
+                                        imgsz=self._scan_yolo_imgsz,
+                                        conf=self._scan_yolo_conf,
+                                        iou=float(self.yolo_iou.get()),
+                                        device=self._yolo_device,
+                                        verbose=False
+                                    )[0]
+
+                                    if res is not None and res.boxes is not None and len(res.boxes) > 0:
+                                        for b in res.boxes:
+                                            conf = float(b.conf.cpu().item() or 0.0)
+                                            if conf < self._scan_yolo_conf: 
+                                                continue
+                                            cls = int(b.cls.cpu().item() or -1)
+                                            x1,y1,x2,y2 = b.xyxy[0].cpu().numpy().tolist()
+                                            cx = 0.5*(x1+x2); cy = 0.5*(y1+y2)
+                                            # ★ CSV는 '보정 좌표계'로 기록됨
+                                            self._scan_csv_writer.writerow([name, pan_deg, tilt_deg, cx, cy, x2-x1, y2-y1, conf, cls, W, H])
+                            except Exception as e:
+                                print("[SCAN][CSV] write err:", e)
                     if self._resume_preview_after_snap:
                         self._resume_preview_after_snap = False
                         self.resume_preview()
+
                 elif tag == "toast":
                     print(payload)
         except queue.Empty:
@@ -712,6 +971,245 @@ class App:
             self._draw_preview_to_label(im)  # 레이아웃 불변
         except Exception as e:
             print("[preview] err:", e)
+        # ===== Pointing helpers =====
+    def pointing_choose_csv(self):
+        path = filedialog.askopenfilename(filetypes=[("CSV","*.csv")])
+        if path:
+            self.point_csv_path.set(path)
+
+    @staticmethod
+    def _linfit_xy(x, y):
+        import numpy as np
+        x = np.asarray(x, float); y = np.asarray(y, float)
+        if len(x) < 2:
+            return None
+        A = np.vstack([x, np.ones_like(x)]).T
+        a, b = np.linalg.lstsq(A, y, rcond=None)[0]
+        return float(a), float(b)
+
+    def pointing_compute(self):
+        """
+        CSV를 읽어:
+          1) tilt별 cx= a*pan + b → pan_center = (W/2 - b)/a
+          2) pan별  cy= e*tilt+ f → tilt_center= (H/2 - f)/e
+        를 구하고, 각 bin의 샘플 수 N으로 가중평균하여 최종 타깃 pan/tilt 계산.
+        """
+        path = self.point_csv_path.get().strip()
+        if not path:
+            ui_q.put(("toast", "CSV를 선택하세요."))
+            return
+
+        try:
+            import numpy as np, csv
+            rows = []
+            W_frame = H_frame = None
+            conf_min = float(self.point_conf_min.get())
+            min_samples = int(self.point_min_samples.get())
+
+            with open(path, newline="", encoding="utf-8") as f:
+                r = csv.DictReader(f)
+                for d in r:
+                    if d.get("conf","")=="":
+                        continue
+                    conf = float(d["conf"])
+                    if conf < conf_min:
+                        continue
+                    pan  = d.get("pan_deg"); tilt = d.get("tilt_deg")
+                    if pan in ("",None) or tilt in ("",None):
+                        continue
+                    pan = float(pan); tilt = float(tilt)
+                    cx = float(d["cx"]); cy = float(d["cy"])
+                    W  = int(d["W"]) if d.get("W") else None
+                    H  = int(d["H"]) if d.get("H") else None
+                    if W_frame is None and W: W_frame = W
+                    if H_frame is None and H: H_frame = H
+                    rows.append((pan, tilt, cx, cy))
+
+            if not rows:
+                ui_q.put(("toast", "CSV에서 조건을 만족하는 행이 없습니다. conf/min_samples 확인."))
+                return
+            if W_frame is None or H_frame is None:
+                ui_q.put(("toast", "CSV에 W/H 정보가 없습니다. (W,H 열 필요)"))
+                return
+
+            # --- tilt별 수평 피팅: cx vs pan
+            from collections import defaultdict
+            # ---- tilt별: cx = a*pan + b → pan_center = (W/2 - b)/a
+            by_tilt = defaultdict(list)
+            for pan, tilt, cx, cy in rows:
+                by_tilt[round(tilt, 3)].append((pan, cx))
+
+            fits_h = {}  # tilt -> dict
+            for tkey, arr in by_tilt.items():
+                if len(arr) < min_samples: 
+                    continue
+                arr.sort(key=lambda v: v[0])
+                pans = np.array([p for p,_ in arr], float)
+                cxs  = np.array([c for _,c in arr], float)
+                A = np.vstack([pans, np.ones_like(pans)]).T
+                a, b = np.linalg.lstsq(A, cxs, rcond=None)[0]
+                # R^2
+                yhat = a*pans + b
+                ss_res = float(np.sum((cxs - yhat)**2))
+                ss_tot = float(np.sum((cxs - np.mean(cxs))**2)) + 1e-9
+                R2 = 1.0 - ss_res/ss_tot
+                pan_center = (W_frame/2.0 - b)/a if abs(a) > 1e-9 else np.nan
+                fits_h[float(tkey)] = {
+                    "a": float(a), "b": float(b), "R2": float(R2),
+                    "N": int(len(arr)), "pan_center": float(pan_center),
+                }
+
+            # ---- pan별: cy = e*tilt + f → tilt_center = (H/2 - f)/e
+            by_pan = defaultdict(list)
+            for pan, tilt, cx, cy in rows:
+                by_pan[round(pan, 3)].append((tilt, cy))
+
+            fits_v = {}  # pan -> dict
+            for pkey, arr in by_pan.items():
+                if len(arr) < min_samples:
+                    continue
+                arr.sort(key=lambda v: v[0])
+                tilts = np.array([t for t,_ in arr], float)
+                cys   = np.array([c for _,c in arr], float)
+                A = np.vstack([tilts, np.ones_like(tilts)]).T
+                e, f = np.linalg.lstsq(A, cys, rcond=None)[0]
+                yhat = e*tilts + f
+                ss_res = float(np.sum((cys - yhat)**2))
+                ss_tot = float(np.sum((cys - np.mean(cys))**2)) + 1e-9
+                R2 = 1.0 - ss_res/ss_tot
+                tilt_center = (H_frame/2.0 - f)/e if abs(e) > 1e-9 else np.nan
+                fits_v[float(pkey)] = {
+                    "e": float(e), "f": float(f), "R2": float(R2),
+                    "N": int(len(arr)), "tilt_center": float(tilt_center),
+                }
+
+            # ---- 전역 저장 (센터링/보간에서 사용)
+            self._fits_h = fits_h
+            self._fits_v = fits_v
+
+            # ---- (기존처럼) 가중평균 타깃 계산해서 UI에 표시
+            def wavg_center(fits: dict, center_key: str):
+                if not fits: return None
+                vals = np.array([fits[k][center_key] for k in fits], float)
+                w    = np.array([fits[k]["N"]          for k in fits], float)
+                return float(np.sum(vals*w)/np.sum(w))
+
+            pan_target  = wavg_center(fits_h, "pan_center")
+            tilt_target = wavg_center(fits_v, "tilt_center")
+            if pan_target is not None:  self.point_pan_target.set(round(pan_target, 3))
+            if tilt_target is not None: self.point_tilt_target.set(round(tilt_target, 3))
+
+            ui_q.put(("toast",
+                f"[Pointing] pan={self.point_pan_target.get()}°, "
+                f"tilt={self.point_tilt_target.get()}°  "
+                f"(fits: H={len(fits_h)}, V={len(fits_v)})"))
+
+        except Exception as e:
+            ui_q.put(("toast", f"[Pointing] 계산 실패: {e}"))
+
+    def pointing_move(self):
+        try:
+            pan_t  = float(self.point_pan_target.get())
+            tilt_t = float(self.point_tilt_target.get())
+        except Exception:
+            ui_q.put(("toast", "먼저 '가중평균 계산'으로 타깃을 구하세요."))
+            return
+        spd = int(self.point_speed.get()); acc = float(self.point_acc.get())
+
+        # 현재 명령 각도 기억
+        self._curr_pan, self._curr_tilt = pan_t, tilt_t
+
+        # 이동
+        self.ctrl.send({"cmd":"move","pan":pan_t,"tilt":tilt_t,"speed":spd,"acc":acc})
+        ui_q.put(("toast", f"→ Move to (pan={pan_t}°, tilt={tilt_t}°)"))
+
+        # ==== 여기서 좌표 로깅 시작 ====
+        try:
+            from datetime import datetime
+            import csv, os
+            log_dir = DEFAULT_OUT_DIR
+            os.makedirs(log_dir, exist_ok=True)
+            fname = f"point_xy_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            path  = log_dir / fname
+            # 열려있던 거 있으면 닫기
+            if self._pointing_log_fp:
+                try: self._pointing_log_fp.close()
+                except: pass
+            self._pointing_log_fp = open(path, "w", newline="", encoding="utf-8")
+            self._pointing_log_writer = csv.writer(self._pointing_log_fp)
+            self._pointing_log_writer.writerow(
+                ["ts","pan_cmd_deg","tilt_cmd_deg","mean_cx","mean_cy","err_x_px","err_y_px","W","H","n_dets"]
+            )
+            self._pointing_logging = True
+            ui_q.put(("toast", f"[Point] logging → {path} (preview 켜고 YOLO ON 하면 기록)"))
+        except Exception as e:
+            self._pointing_logging = False
+            ui_q.put(("toast", f"[Point] 로그 시작 실패: {e}"))
+    def _interp_fit(self, fmap: dict, q: float, key_slope: str, k: int = 2):
+        """근처 k개 키로 1/d 가중 평균 보간 (기울기 a 또는 e 추정)."""
+        import numpy as np
+        if not fmap:
+            return np.nan
+        ks = np.array(list(fmap.keys()), float)
+        vs = np.array([fmap[k][key_slope] for k in fmap], float)
+        order = np.argsort(np.abs(ks - q))[:max(1, min(k, len(ks)))]
+        sel_k, sel_v = ks[order], vs[order]
+        d = np.abs(sel_k - q) + 1e-6
+        w = 1.0 / d
+        return float(np.sum(sel_v * w) / np.sum(w))
+
+    def _centering_on_centroid(self, m_cx: float, m_cy: float, W: int, H: int):
+        """프리뷰에서 평균점 얻을 때마다 호출 → 작은 각도 스텝으로 중앙 수렴."""
+        import time, numpy as np
+        if not self.centering_enable.get():
+            self._centering_ok_frames = 0
+            return
+
+        # 중앙 오차(px)
+        ex = (W/2.0) - float(m_cx)
+        ey = (H/2.0) - float(m_cy)
+        tol = int(self.centering_px_tol.get())
+
+        # 안정 프레임 카운트
+        if abs(ex) <= tol and abs(ey) <= tol:
+            self._centering_ok_frames += 1
+        else:
+            self._centering_ok_frames = 0
+
+        # 충분히 안정되면 종료 메시지(선택)
+        if self._centering_ok_frames >= int(self.centering_min_frames.get()):
+            return
+
+        # 쿨다운(명령 과다 방지)
+        now_ms = int(time.time() * 1000)
+        if now_ms - self._centering_last_ms < int(self.centering_cooldown.get()):
+            return
+
+        # px/deg 기울기 추정: a=∂cx/∂pan (tilt근방), e=∂cy/∂tilt (pan근방)
+        a = self._interp_fit(getattr(self, "_fits_h", {}), self._curr_tilt, "a", k=2)
+        e = self._interp_fit(getattr(self, "_fits_v", {}), self._curr_pan,  "e", k=2)
+
+        # 기울기 없으면 보수적으로 스킵
+        if not np.isfinite(a) or abs(a) < 1e-6 or not np.isfinite(e) or abs(e) < 1e-6:
+            return
+
+        # 각도 보정량(°)
+        dpan  = float(np.clip(ex / a, -float(self.centering_max_step.get()), float(self.centering_max_step.get())))
+        dtilt = float(np.clip(ey / e, -float(self.centering_max_step.get()), float(self.centering_max_step.get())))
+
+        # 현재 명령 각도 업데이트
+        self._curr_pan  = float(self._curr_pan  + dpan)
+        self._curr_tilt = float(self._curr_tilt + dtilt)
+
+        # 이동 명령
+        self.ctrl.send({
+            "cmd":"move",
+            "pan":  self._curr_pan,
+            "tilt": self._curr_tilt,
+            "speed": int(self.point_speed.get()),
+            "acc":   float(self.point_acc.get())
+        })
+        self._centering_last_ms = now_ms
 
 def main():
     root = Tk()
