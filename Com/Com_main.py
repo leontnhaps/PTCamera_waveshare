@@ -397,6 +397,39 @@ class App:
         # (선택) 현재 명령 각도 기억
         self._curr_pan = 0.0
         self._curr_tilt = 0.0
+        
+        self._fits_h = {}
+        self._fits_v = {}
+        # Pointing 탭에 추가 UI
+        # centering state
+        self._centering_ok_frames = 0
+        self._centering_last_ms = 0
+
+        ttk.Separator(tab_point, orient="horizontal").grid(row=15, column=0, columnspan=4, sticky="ew", pady=(8,6))
+
+        self.centering_enable   = BooleanVar(value=False)
+        self.centering_px_tol   = IntVar(value=5)      # 중앙 판정 오차(px)
+        self.centering_min_frames = IntVar(value=4)    # 연속 N프레임 만족 시 종료
+        self.centering_max_step = DoubleVar(value=1.0) # 한번에 움직일 최대 각도(°)
+        self.centering_cooldown = IntVar(value=250)    # 명령 간 최소 간격(ms)
+
+        Checkbutton(tab_point, text="Centering mode (live refine)", variable=self.centering_enable)\
+            .grid(row=16, column=0, sticky="w")
+
+        Label(tab_point, text="px tol").grid(row=16, column=1, sticky="e")
+        ttk.Entry(tab_point, width=6, textvariable=self.centering_px_tol).grid(row=16, column=2, sticky="w")
+
+        Label(tab_point, text="max step(°)").grid(row=17, column=1, sticky="e")
+        ttk.Entry(tab_point, width=6, textvariable=self.centering_max_step).grid(row=17, column=2, sticky="w")
+
+        Label(tab_point, text="cooldown(ms)").grid(row=17, column=0, sticky="e")
+        ttk.Entry(tab_point, width=8, textvariable=self.centering_cooldown).grid(row=17, column=1, sticky="w")
+
+        Label(tab_point, text="stable frames").grid(row=17, column=3, sticky="e")
+        ttk.Entry(tab_point, width=6, textvariable=self.centering_min_frames).grid(row=17, column=3, sticky="w")
+
+        for c in range(4):
+            tab_point.grid_columnconfigure(c, weight=1)
 
     def _ensure_yolo_model_for_scan(self) -> bool:
         """스캔 중 CSV 기록용 YOLO 모델 준비(overlay 사용 여부와 무관)."""
@@ -645,6 +678,7 @@ class App:
                         # 점/원 + 텍스트
                         cv2.circle(bgr, (int(round(m_cx)), int(round(m_cy))), 5, (0,200,255), -1, lineType=cv2.LINE_AA)
                         err_x = (W/2.0 - m_cx); err_y = (H/2.0 - m_cy)
+                        self._centering_on_centroid(m_cx, m_cy, W, H)
                         if self._pointing_logging and (self._pointing_log_writer is not None):
                             from datetime import datetime
                             try:
@@ -1000,72 +1034,75 @@ class App:
 
             # --- tilt별 수평 피팅: cx vs pan
             from collections import defaultdict
+            # ---- tilt별: cx = a*pan + b → pan_center = (W/2 - b)/a
             by_tilt = defaultdict(list)
             for pan, tilt, cx, cy in rows:
                 by_tilt[round(tilt, 3)].append((pan, cx))
 
-            pan_centers = []  # (tilt_key, pan_center, N)
+            fits_h = {}  # tilt -> dict
             for tkey, arr in by_tilt.items():
+                if len(arr) < min_samples: 
+                    continue
                 arr.sort(key=lambda v: v[0])
-                pans = [p for p,_ in arr]
-                cxs  = [c for _,c in arr]
-                if len(pans) < min_samples:
-                    continue
-                fit = self._linfit_xy(pans, cxs)
-                if fit is None: 
-                    continue
-                a, b = fit
-                if a == 0:
-                    continue
-                pan_center = (W_frame/2.0 - b) / a
-                pan_centers.append((tkey, float(pan_center), len(pans)))
+                pans = np.array([p for p,_ in arr], float)
+                cxs  = np.array([c for _,c in arr], float)
+                A = np.vstack([pans, np.ones_like(pans)]).T
+                a, b = np.linalg.lstsq(A, cxs, rcond=None)[0]
+                # R^2
+                yhat = a*pans + b
+                ss_res = float(np.sum((cxs - yhat)**2))
+                ss_tot = float(np.sum((cxs - np.mean(cxs))**2)) + 1e-9
+                R2 = 1.0 - ss_res/ss_tot
+                pan_center = (W_frame/2.0 - b)/a if abs(a) > 1e-9 else np.nan
+                fits_h[float(tkey)] = {
+                    "a": float(a), "b": float(b), "R2": float(R2),
+                    "N": int(len(arr)), "pan_center": float(pan_center),
+                }
 
-            # --- pan별 수직 피팅: cy vs tilt
+            # ---- pan별: cy = e*tilt + f → tilt_center = (H/2 - f)/e
             by_pan = defaultdict(list)
             for pan, tilt, cx, cy in rows:
                 by_pan[round(pan, 3)].append((tilt, cy))
 
-            tilt_centers = []  # (pan_key, tilt_center, N)
+            fits_v = {}  # pan -> dict
             for pkey, arr in by_pan.items():
+                if len(arr) < min_samples:
+                    continue
                 arr.sort(key=lambda v: v[0])
-                tilts = [t for t,_ in arr]
-                cys   = [c for _,c in arr]
-                if len(tilts) < min_samples:
-                    continue
-                fit = self._linfit_xy(tilts, cys)
-                if fit is None:
-                    continue
-                e, f = fit
-                if e == 0:
-                    continue
-                tilt_center = (H_frame/2.0 - f) / e
-                tilt_centers.append((pkey, float(tilt_center), len(tilts)))
+                tilts = np.array([t for t,_ in arr], float)
+                cys   = np.array([c for _,c in arr], float)
+                A = np.vstack([tilts, np.ones_like(tilts)]).T
+                e, f = np.linalg.lstsq(A, cys, rcond=None)[0]
+                yhat = e*tilts + f
+                ss_res = float(np.sum((cys - yhat)**2))
+                ss_tot = float(np.sum((cys - np.mean(cys))**2)) + 1e-9
+                R2 = 1.0 - ss_res/ss_tot
+                tilt_center = (H_frame/2.0 - f)/e if abs(e) > 1e-9 else np.nan
+                fits_v[float(pkey)] = {
+                    "e": float(e), "f": float(f), "R2": float(R2),
+                    "N": int(len(arr)), "tilt_center": float(tilt_center),
+                }
 
-            if not pan_centers and not tilt_centers:
-                ui_q.put(("toast", "유효한 피팅 결과가 없습니다. 샘플 수를 늘려주세요."))
-                return
+            # ---- 전역 저장 (센터링/보간에서 사용)
+            self._fits_h = fits_h
+            self._fits_v = fits_v
 
-            # --- N으로 가중 평균 ---
-            def wavg(triples):
-                if not triples: return None
-                vals = np.array([v for _,v,_ in triples], float)
-                w    = np.array([n for *_,n in triples], float)
+            # ---- (기존처럼) 가중평균 타깃 계산해서 UI에 표시
+            def wavg_center(fits: dict, center_key: str):
+                if not fits: return None
+                vals = np.array([fits[k][center_key] for k in fits], float)
+                w    = np.array([fits[k]["N"]          for k in fits], float)
                 return float(np.sum(vals*w)/np.sum(w))
 
-            pan_target  = wavg(pan_centers)  # (tilt-bins의 pan_center) 가중평균
-            tilt_target = wavg(tilt_centers) # (pan-bins의  tilt_center) 가중평균
+            pan_target  = wavg_center(fits_h, "pan_center")
+            tilt_target = wavg_center(fits_v, "tilt_center")
+            if pan_target is not None:  self.point_pan_target.set(round(pan_target, 3))
+            if tilt_target is not None: self.point_tilt_target.set(round(tilt_target, 3))
 
-            if pan_target is not None:
-                self.point_pan_target.set(round(pan_target, 3))
-            if tilt_target is not None:
-                self.point_tilt_target.set(round(tilt_target, 3))
-
-            # 요약 토스트
             ui_q.put(("toast",
-                f"[Pointing] pan_target={self.point_pan_target.get()}°, "
-                f"tilt_target={self.point_tilt_target.get()}°  "
-                f"(bins: H={len(pan_centers)}, V={len(tilt_centers)})"
-            ))
+                f"[Pointing] pan={self.point_pan_target.get()}°, "
+                f"tilt={self.point_tilt_target.get()}°  "
+                f"(fits: H={len(fits_h)}, V={len(fits_v)})"))
 
         except Exception as e:
             ui_q.put(("toast", f"[Pointing] 계산 실패: {e}"))
@@ -1108,6 +1145,71 @@ class App:
         except Exception as e:
             self._pointing_logging = False
             ui_q.put(("toast", f"[Point] 로그 시작 실패: {e}"))
+    def _interp_fit(self, fmap: dict, q: float, key_slope: str, k: int = 2):
+        """근처 k개 키로 1/d 가중 평균 보간 (기울기 a 또는 e 추정)."""
+        import numpy as np
+        if not fmap:
+            return np.nan
+        ks = np.array(list(fmap.keys()), float)
+        vs = np.array([fmap[k][key_slope] for k in fmap], float)
+        order = np.argsort(np.abs(ks - q))[:max(1, min(k, len(ks)))]
+        sel_k, sel_v = ks[order], vs[order]
+        d = np.abs(sel_k - q) + 1e-6
+        w = 1.0 / d
+        return float(np.sum(sel_v * w) / np.sum(w))
+
+    def _centering_on_centroid(self, m_cx: float, m_cy: float, W: int, H: int):
+        """프리뷰에서 평균점 얻을 때마다 호출 → 작은 각도 스텝으로 중앙 수렴."""
+        import time, numpy as np
+        if not self.centering_enable.get():
+            self._centering_ok_frames = 0
+            return
+
+        # 중앙 오차(px)
+        ex = (W/2.0) - float(m_cx)
+        ey = (H/2.0) - float(m_cy)
+        tol = int(self.centering_px_tol.get())
+
+        # 안정 프레임 카운트
+        if abs(ex) <= tol and abs(ey) <= tol:
+            self._centering_ok_frames += 1
+        else:
+            self._centering_ok_frames = 0
+
+        # 충분히 안정되면 종료 메시지(선택)
+        if self._centering_ok_frames >= int(self.centering_min_frames.get()):
+            return
+
+        # 쿨다운(명령 과다 방지)
+        now_ms = int(time.time() * 1000)
+        if now_ms - self._centering_last_ms < int(self.centering_cooldown.get()):
+            return
+
+        # px/deg 기울기 추정: a=∂cx/∂pan (tilt근방), e=∂cy/∂tilt (pan근방)
+        a = self._interp_fit(getattr(self, "_fits_h", {}), self._curr_tilt, "a", k=2)
+        e = self._interp_fit(getattr(self, "_fits_v", {}), self._curr_pan,  "e", k=2)
+
+        # 기울기 없으면 보수적으로 스킵
+        if not np.isfinite(a) or abs(a) < 1e-6 or not np.isfinite(e) or abs(e) < 1e-6:
+            return
+
+        # 각도 보정량(°)
+        dpan  = float(np.clip(ex / a, -float(self.centering_max_step.get()), float(self.centering_max_step.get())))
+        dtilt = float(np.clip(ey / e, -float(self.centering_max_step.get()), float(self.centering_max_step.get())))
+
+        # 현재 명령 각도 업데이트
+        self._curr_pan  = float(self._curr_pan  + dpan)
+        self._curr_tilt = float(self._curr_tilt + dtilt)
+
+        # 이동 명령
+        self.ctrl.send({
+            "cmd":"move",
+            "pan":  self._curr_pan,
+            "tilt": self._curr_tilt,
+            "speed": int(self.point_speed.get()),
+            "acc":   float(self.point_acc.get())
+        })
+        self._centering_last_ms = now_ms
 
 def main():
     root = Tk()

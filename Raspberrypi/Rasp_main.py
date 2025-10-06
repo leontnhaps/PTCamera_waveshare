@@ -11,7 +11,8 @@ import serial
 from picamera2 import Picamera2
 
 # ===================== 환경 설정 =====================
-DEFAULT_SERVER_HOST = "192.168.0.9"
+#DEFAULT_SERVER_HOST = "192.168.0.9" # 711a
+DEFAULT_SERVER_HOST = "172.30.1.100" # 602a
 SERVER_HOST = os.getenv("SERVER_HOST", DEFAULT_SERVER_HOST)   # 노트북/PC 서버 IP
 CTRL_PORT   = int(os.getenv("CTRL_PORT", "7500"))
 IMG_PORT    = int(os.getenv("IMG_PORT",  "7501"))
