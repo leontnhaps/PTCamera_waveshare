@@ -431,6 +431,65 @@ class App:
         for c in range(4):
             tab_point.grid_columnconfigure(c, weight=1)
 
+        # ==== Laser tracking (red only) ====
+        self.laser_track_enable = BooleanVar(value=True)
+        self.laser_target_dy    = IntVar(value=0)    # 목표 y 오프셋(px)
+
+        # HSV 임계 (빨강은 Hue 양끝, S/V 높게)
+        self.laser_h_lo1 = IntVar(value=0)     # [0,10]
+        self.laser_h_hi1 = IntVar(value=10)
+        self.laser_h_lo2 = IntVar(value=170)   # [170,180]
+        self.laser_h_hi2 = IntVar(value=180)
+        self.laser_s_min = IntVar(value=120)   # 채도 최소
+        self.laser_v_min = IntVar(value=180)   # 명도 최소
+
+        self.laser_min_area = IntVar(value=3)      # 픽셀
+        self.laser_max_area = IntVar(value=5000)   # 픽셀
+        self.laser_open_ksz = IntVar(value=1)      # 모폴로지 open 커널 반경(px)
+
+        ttk.Separator(misc, orient="horizontal").grid(row=row, column=0, columnspan=4, sticky="ew", pady=(10,6)); row+=1
+        Checkbutton(misc, text="Laser tracking (RED HSV)", variable=self.laser_track_enable)\
+            .grid(row=row, column=0, sticky="w"); row+=1
+        Label(misc, text="target Δy(px)").grid(row=row, column=0, sticky="w")
+        ttk.Entry(misc, width=8, textvariable=self.laser_target_dy).grid(row=row, column=1, sticky="w", padx=4); row+=1
+
+        Label(misc, text="H1[lo,hi]").grid(row=row, column=0, sticky="w")
+        ttk.Entry(misc, width=6, textvariable=self.laser_h_lo1).grid(row=row, column=1, sticky="w")
+        ttk.Entry(misc, width=6, textvariable=self.laser_h_hi1).grid(row=row, column=2, sticky="w"); row+=1
+
+        Label(misc, text="H2[lo,hi]").grid(row=row, column=0, sticky="w")
+        ttk.Entry(misc, width=6, textvariable=self.laser_h_lo2).grid(row=row, column=1, sticky="w")
+        ttk.Entry(misc, width=6, textvariable=self.laser_h_hi2).grid(row=row, column=2, sticky="w"); row+=1
+
+        Label(misc, text="S≥ / V≥").grid(row=row, column=0, sticky="w")
+        ttk.Entry(misc, width=6, textvariable=self.laser_s_min).grid(row=row, column=1, sticky="w")
+        ttk.Entry(misc, width=6, textvariable=self.laser_v_min).grid(row=row, column=2, sticky="w"); row+=1
+
+        Label(misc, text="min/max area").grid(row=row, column=0, sticky="w")
+        ttk.Entry(misc, width=8, textvariable=self.laser_min_area).grid(row=row, column=1, sticky="w")
+        ttk.Entry(misc, width=8, textvariable=self.laser_max_area).grid(row=row, column=2, sticky="w"); row+=1
+
+        Label(misc, text="open ksz").grid(row=row, column=0, sticky="w")
+        ttk.Entry(misc, width=6, textvariable=self.laser_open_ksz).grid(row=row, column=1, sticky="w"); row+=1
+
+        # [YOLO 아래쪽 설정 UI 근처에 추가]
+        self.film_lock_enable = BooleanVar(value=True)     # 필름 중심에 레이저를 맞추기
+        self.film_cls_id      = IntVar(value=-1)           # 특정 클래스만 필터(-1이면 전체에서 가장 큰 박스 사용)
+        self.film_conf_min    = DoubleVar(value=0.5)       # 필름 박스 최소 신뢰도
+
+        Checkbutton(misc, text="Film lock (align laser to film center)", 
+                    variable=self.film_lock_enable).grid(row=row, column=0, sticky="w"); row+=1
+        Label(misc, text="film cls id (-1:any)").grid(row=row, column=0, sticky="w")
+        ttk.Entry(misc, width=8, textvariable=self.film_cls_id)\
+            .grid(row=row, column=1, sticky="w", padx=4)
+        Label(misc, text="film conf ≥").grid(row=row, column=2, sticky="w")
+        ttk.Entry(misc, width=8, textvariable=self.film_conf_min)\
+            .grid(row=row, column=3, sticky="w", padx=4); row+=1
+
+        # 상태
+        self._film_last_center = None   # (cx_f, cy_f) 최근 프레임 기준
+        self._laser_last = None         # (cx_l, cy_l)
+
     def _ensure_yolo_model_for_scan(self) -> bool:
         """스캔 중 CSV 기록용 YOLO 모델 준비(overlay 사용 여부와 무관)."""
         # 이미 overlay에서 로드돼 있으면 재사용
@@ -618,7 +677,6 @@ class App:
         bgr = np.ascontiguousarray(bgr, dtype=np.uint8)
         if not self._ensure_yolo_model():
             return bgr
-
         try:
             N = max(1, int(self.yolo_stride.get()))
             run_infer = (self._yolo_idx % N) == 0
@@ -638,74 +696,72 @@ class App:
                     clses = res.boxes.cls.detach().cpu().numpy().astype(int)
                     self._yolo_last = (boxes, confs, clses)
                 else:
-                    self._yolo_last = (np.empty((0,4), int), np.array([]), np.array([]))
+                    self._yolo_last = (np.empty((0,4), int), np.array([]), np.array([], int))
 
-            # draw from cache
+            # ---- 여기부터: 항상 안전한 기본값으로 시작 ----
+            boxes = np.empty((0,4), int)
+            confs = np.array([])
+            clses = np.array([], dtype=int)
             if self._yolo_last is not None:
                 boxes, confs, clses = self._yolo_last
-                th = max(1, int(self.yolo_box_thick.get()))
-                ts = max(0.3, float(self.yolo_text_scale.get()))
-                tth = max(1, int(self.yolo_text_thick.get()))
 
-                H, W = bgr.shape[:2]
+            th  = max(1, int(self.yolo_box_thick.get()))
+            ts  = max(0.3, float(self.yolo_text_scale.get()))
+            tth = max(1, int(self.yolo_text_thick.get()))
+            H, W = bgr.shape[:2]
 
-                # 1) 박스들 렌더
-                for (x1,y1,x2,y2), c, k in zip(boxes, confs, clses):
-                    cv2.rectangle(bgr, (x1,y1), (x2,y2), (0,255,0), th, lineType=cv2.LINE_AA)
-                    label = f"{c:.2f}"
-                    org = (x1, max(15, y1-6))
-                    cv2.putText(bgr, label, org, cv2.FONT_HERSHEY_SIMPLEX, ts, (0,0,0), tth+2, cv2.LINE_AA)
-                    cv2.putText(bgr, label, org, cv2.FONT_HERSHEY_SIMPLEX, ts, (0,255,0), tth,   cv2.LINE_AA)
+            # 1) 박스 렌더
+            for (x1,y1,x2,y2), c, k in zip(boxes, confs, clses):
+                cv2.rectangle(bgr, (x1,y1), (x2,y2), (0,255,0), th, lineType=cv2.LINE_AA)
+                label = f"{c:.2f}"
+                org = (x1, max(15, y1-6))
+                cv2.putText(bgr, label, org, cv2.FONT_HERSHEY_SIMPLEX, ts, (0,0,0), tth+2, cv2.LINE_AA)
+                cv2.putText(bgr, label, org, cv2.FONT_HERSHEY_SIMPLEX, ts, (0,255,0), tth,   cv2.LINE_AA)
 
-                # 2) (옵션) 화면 중앙 십자
-                if getattr(self, "yolo_show_center_cross", True) and self.yolo_show_center_cross.get():
-                    cx0, cy0 = int(W/2), int(H/2)
-                    cv2.drawMarker(bgr, (cx0, cy0), (255,255,255), markerType=cv2.MARKER_CROSS, 
-                                markerSize=14, thickness=1, line_type=cv2.LINE_AA)
+            # 2) (옵션) 중앙 십자
+            if self.yolo_show_center_cross.get():
+                cv2.drawMarker(bgr, (W//2, H//2), (255,255,255), cv2.MARKER_CROSS, 14, 1, cv2.LINE_AA)
 
-                # 3) (옵션) 검출들의 중심점 평균(centroid) 그리기
-                if getattr(self, "yolo_show_centroid", True) and self.yolo_show_centroid.get():
-                    # conf 필터는 이미 predict에 들어가 있으므로 전체 사용
-                    if boxes.shape[0] > 0:
-                        centers = []
-                        for (x1,y1,x2,y2) in boxes:
-                            cx = 0.5*(x1+x2); cy = 0.5*(y1+y2)
-                            centers.append((cx, cy))
-                        # 평균
-                        m_cx = float(np.mean([c[0] for c in centers]))
-                        m_cy = float(np.mean([c[1] for c in centers]))
+            # 3) (옵션) 평균 중심점
+            if self.yolo_show_centroid.get() and boxes.shape[0] > 0:
+                centers = [(0.5*(x1+x2), 0.5*(y1+y2)) for (x1,y1,x2,y2) in boxes]
+                m_cx = float(np.mean([c[0] for c in centers])); m_cy = float(np.mean([c[1] for c in centers]))
+                cv2.circle(bgr, (int(round(m_cx)), int(round(m_cy))), 5, (0,200,255), -1, lineType=cv2.LINE_AA)
+                self._centering_on_centroid(m_cx, m_cy, W, H)
+                err_x = (W/2.0 - m_cx); err_y = (H/2.0 - m_cy)
+                txt = f"mean ({m_cx:.1f},{m_cy:.1f})  err ({err_x:+.1f},{err_y:+.1f}) px"
+                cv2.putText(bgr, txt, (10, max(20, H-15)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0,0,0), 3, cv2.LINE_AA)
+                cv2.putText(bgr, txt, (10, max(20, H-15)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0,255,255), 1, cv2.LINE_AA)
 
-                        # 점/원 + 텍스트
-                        cv2.circle(bgr, (int(round(m_cx)), int(round(m_cy))), 5, (0,200,255), -1, lineType=cv2.LINE_AA)
-                        err_x = (W/2.0 - m_cx); err_y = (H/2.0 - m_cy)
-                        self._centering_on_centroid(m_cx, m_cy, W, H)
-                        if self._pointing_logging and (self._pointing_log_writer is not None):
-                            from datetime import datetime
-                            try:
-                                self._pointing_log_writer.writerow([
-                                    datetime.now().isoformat(timespec="milliseconds"),
-                                    f"{self._curr_pan:.3f}", f"{self._curr_tilt:.3f}",
-                                    f"{m_cx:.3f}", f"{m_cy:.3f}",
-                                    f"{err_x:.3f}", f"{err_y:.3f}",
-                                    int(W), int(H),
-                                    int(boxes.shape[0])
-                                ])
-                                # 즉시 파일에 내리고 싶으면 다음 줄 주석 해제
-                                # self._pointing_log_fp.flush()
-                            except Exception as e:
-                                print("[Point] write err:", e)
-                        txt = f"mean ({m_cx:.1f},{m_cy:.1f})  err ({err_x:+.1f},{err_y:+.1f}) px"
-                        # 텍스트 배경
-                        cv2.putText(bgr, txt, (10, max(20, H-15)), cv2.FONT_HERSHEY_SIMPLEX, 
-                                    0.55, (0,0,0), 3, cv2.LINE_AA)
-                        cv2.putText(bgr, txt, (10, max(20, H-15)), cv2.FONT_HERSHEY_SIMPLEX, 
-                                    0.55, (0,255,255), 1, cv2.LINE_AA)
-                        
+            # === Film center 추출/저장 ===
+            film_cx = film_cy = None
+            cand = []  # ← 항상 미리 선언해두기
+            if boxes.shape[0] > 0:
+                want_cls = int(self.film_cls_id.get())
+                conf_min = float(self.film_conf_min.get())
+                for i, ((x1,y1,x2,y2), c, k) in enumerate(zip(boxes, confs, clses)):
+                    if c < conf_min: 
+                        continue
+                    if want_cls >= 0 and k != want_cls:
+                        continue
+                    area = max(1, (x2 - x1) * (y2 - y1))
+                    cx = 0.5*(x1 + x2); cy = 0.5*(y1 + y2)
+                    score = float(area) * float(c)  # 큰 물체 + 높은 conf 우선
+                    cand.append((score, area, cx, cy, i))
+
+            if len(cand) > 0:
+                cand.sort(reverse=True)
+                _, _, film_cx, film_cy, _ = cand[0]
+                cv2.drawMarker(bgr, (int(round(film_cx)), int(round(film_cy))),
+                            (255, 200, 0), cv2.MARKER_CROSS, 18, 2, cv2.LINE_AA)
+
+            self._film_last_center = (film_cx, film_cy) if film_cx is not None else None
 
             self._yolo_idx += 1
         except Exception as e:
             print("[YOLO] err:", e)
         return bgr
+
 
 
     # helpers
@@ -963,15 +1019,45 @@ class App:
             if self.ud_enable.get() and self._ud_K is not None:
                 bgr = self._undistort_bgr(bgr)
 
-            # YOLO overlay
+            # 1) YOLO 먼저 실행 → 필름 중심 추출/저장
             bgr = self._run_yolo_and_draw(bgr)
+            film_center = self._film_last_center  # (cx_f, cy_f) or None
 
+            # 2) 레이저 검출
+            found_laser, lx, ly, score = (False, 0.0, 0.0, 0.0)
+            if self.laser_track_enable.get():
+                found_laser, lx, ly, score = self._detect_red_laser(bgr)
+
+            H, W = bgr.shape[:2]
+
+            # 3) Film lock: 레이저를 '필름 중심'에 붙인다
+            if self.film_lock_enable.get() and film_center is not None and found_laser:
+                fx, fy = film_center
+                # 시각화(선택)
+                cv2.circle(bgr, (int(round(lx)), int(round(ly))), 6, (0,0,255), -1, lineType=cv2.LINE_AA)
+                cv2.drawMarker(bgr, (int(round(fx)), int(round(fy))),
+                            (0,255,255), cv2.MARKER_CROSS, 20, 2, cv2.LINE_AA)
+
+                # 레이저 → 필름 중심 정렬
+                self._align_laser_to_film(lx, ly, fx, fy, W, H)
+
+                # 디버그 텍스트
+                ex = fx - lx; ey = fy - ly
+                cv2.putText(bgr, f"film ({fx:.1f},{fy:.1f})  laser ({lx:.1f},{ly:.1f})  err({ex:+.1f},{ey:+.1f})",
+                            (10, max(20, H-15)), cv2.FONT_HERSHEY_SIMPLEX, 
+                            0.6, (0,0,0), 3, cv2.LINE_AA)
+                cv2.putText(bgr, f"film ({fx:.1f},{fy:.1f})  laser ({lx:.1f},{ly:.1f})  err({ex:+.1f},{ey:+.1f})",
+                            (10, max(20, H-15)), cv2.FONT_HERSHEY_SIMPLEX, 
+                            0.6, (0,255,255), 1, cv2.LINE_AA)
+
+            # (필요 시) 화면 중앙 십자 등 유지
             rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             im = Image.fromarray(rgb)
-            self._draw_preview_to_label(im)  # 레이아웃 불변
+            self._draw_preview_to_label(im)
+
         except Exception as e:
             print("[preview] err:", e)
-        # ===== Pointing helpers =====
+
     def pointing_choose_csv(self):
         path = filedialog.askopenfilename(filetypes=[("CSV","*.csv")])
         if path:
@@ -1202,6 +1288,166 @@ class App:
         self._curr_tilt = float(self._curr_tilt + dtilt)
 
         # 이동 명령
+        self.ctrl.send({
+            "cmd":"move",
+            "pan":  self._curr_pan,
+            "tilt": self._curr_tilt,
+            "speed": int(self.point_speed.get()),
+            "acc":   float(self.point_acc.get())
+        })
+        self._centering_last_ms = now_ms
+
+    def _centering_on_laser(self, lx: float, ly: float, W: int, H: int):
+        """
+        레이저 점(lx,ly) 기준 정밀 보정.
+        pan: 중앙(W/2) 기준
+        tilt: (H/2 + Δy) 기준  ← Δy = self.laser_target_y_offset_px
+        """
+        import time, numpy as np
+        if not self.centering_enable.get():
+            self._centering_ok_frames = 0
+            return
+
+        # 목표 좌표
+        target_x = W/2.0
+        target_y = H/2.0 + float(self.laser_target_y_offset_px.get())
+
+        # 오차(px)
+        ex = (target_x - float(lx))
+        ey = (target_y - float(ly))
+        tol = int(self.centering_px_tol.get())
+
+        # 안정 판정
+        if abs(ex) <= tol and abs(ey) <= tol:
+            self._centering_ok_frames += 1
+        else:
+            self._centering_ok_frames = 0
+        if self._centering_ok_frames >= int(self.centering_min_frames.get()):
+            return
+
+        # 쿨다운
+        now_ms = int(time.time() * 1000)
+        if now_ms - self._centering_last_ms < int(self.centering_cooldown.get()):
+            return
+
+        # px/deg 추정: a=∂cx/∂pan, e=∂cy/∂tilt (CSV에서 회귀한 값 보간)
+        a = self._interp_fit(getattr(self, "_fits_h", {}), self._curr_tilt, "a", k=2)
+        e = self._interp_fit(getattr(self, "_fits_v", {}), self._curr_pan,  "e", k=2)
+        if not np.isfinite(a) or abs(a) < 1e-6 or not np.isfinite(e) or abs(e) < 1e-6:
+            return
+
+        # 각도 보정량(°) 클램프
+        dpan  = float(np.clip(ex / a, -float(self.centering_max_step.get()), float(self.centering_max_step.get())))
+        dtilt = float(np.clip(ey / e, -float(self.centering_max_step.get()), float(self.centering_max_step.get())))
+
+        # 누적/전송
+        self._curr_pan  = float(self._curr_pan  + dpan)
+        self._curr_tilt = float(self._curr_tilt + dtilt)
+        self.ctrl.send({
+            "cmd":"move",
+            "pan":  self._curr_pan,
+            "tilt": self._curr_tilt,
+            "speed": int(self.point_speed.get()),
+            "acc":   float(self.point_acc.get())
+        })
+        self._centering_last_ms = now_ms
+    def _detect_red_laser(self, bgr: np.ndarray):
+        """
+        빨간 레이저 포인트를 HSV 두 구간(0~H1, H2~180) + S/V 임계로 마스크한 뒤
+        연결요소에서 '점수 = 평균 V * 면적'이 가장 큰 blob의 subpixel 중심을 반환.
+        반환: (found: bool, cx: float, cy: float, score: float)
+        """
+        try:
+            hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+            H1_lo, H1_hi = int(self.laser_h_lo1.get()), int(self.laser_h_hi1.get())
+            H2_lo, H2_hi = int(self.laser_h_lo2.get()), int(self.laser_h_hi2.get())
+            S_min, V_min = int(self.laser_s_min.get()), int(self.laser_v_min.get())
+
+            h, s, v = cv2.split(hsv)
+
+            # 빨강 hue는 양끝단에 걸려서 두 구간 합침
+            m1 = cv2.inRange(h, H1_lo, H1_hi)
+            m2 = cv2.inRange(h, H2_lo, H2_hi)
+            mh = cv2.bitwise_or(m1, m2)
+
+            ms = cv2.inRange(s, S_min, 255)
+            mv = cv2.inRange(v, V_min, 255)
+
+            mask = cv2.bitwise_and(mh, cv2.bitwise_and(ms, mv))
+
+            # 모폴로지 오픈으로 노이즈 제거
+            ksz = max(0, int(self.laser_open_ksz.get()))
+            if ksz > 0:
+                k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2*ksz+1, 2*ksz+1))
+                mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k, iterations=1)
+
+            # 연결요소로 blob 스코어링
+            num, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+            if num <= 1:
+                return (False, 0.0, 0.0, 0.0)
+
+            minA = int(self.laser_min_area.get())
+            maxA = int(self.laser_max_area.get())
+
+            best = (-1, -1.0)  # (idx, score)
+            for i in range(1, num):
+                x,y,w,h,a = stats[i]
+                if a < minA or a > maxA: 
+                    continue
+
+                # blob 평균 V를 계산해서 포화/광원과 구분(채도가 이미 크지만 보정)
+                mask_i = (labels == i).astype(np.uint8)
+                mean_v = float(cv2.mean(v, mask=mask_i)[0])
+                score = mean_v * float(a)  # 간단한 점수 함수
+
+                if score > best[1]:
+                    best = (i, score)
+
+            if best[0] < 0:
+                return (False, 0.0, 0.0, 0.0)
+
+            # subpixel 무게중심(밝기 가중치; V를 가중치로 사용)
+            i = best[0]
+            mask_i = (labels == i).astype(np.uint8)
+            ys, xs = np.nonzero(mask_i)
+            if xs.size == 0:
+                return (False, 0.0, 0.0, 0.0)
+            weights = v[ys, xs].astype(np.float32) + 1.0
+            cx = float(np.sum(xs * weights) / np.sum(weights))
+            cy = float(np.sum(ys * weights) / np.sum(weights))
+            return (True, cx, cy, float(best[1]))
+        except Exception as e:
+            print("[laser] detect err:", e)
+            return (False, 0.0, 0.0, 0.0)
+    def _align_laser_to_film(self, lx: float, ly: float, tx: float, ty: float, W: int, H: int):
+        """
+        레이저 (lx, ly)를 타깃 (tx, ty) = '필름 중심'으로 정렬.
+        px 오차 → a,e로 각도 환산 → 쿨다운/클램프 → 이동
+        """
+        import time, numpy as np
+        if not self.centering_enable.get():
+            return
+
+        ex = float(tx) - float(lx)
+        ey = float(ty) - float(ly)
+
+        # 쿨다운
+        now_ms = int(time.time() * 1000)
+        if now_ms - self._centering_last_ms < int(self.centering_cooldown.get()):
+            return
+
+        # px/deg 추정
+        a = self._interp_fit(getattr(self, "_fits_h", {}), self._curr_tilt, "a", k=2)
+        e = self._interp_fit(getattr(self, "_fits_v", {}), self._curr_pan,  "e", k=2)
+        if not np.isfinite(a) or abs(a) < 1e-6 or not np.isfinite(e) or abs(e) < 1e-6:
+            return
+
+        dpan  = float(np.clip(ex / a, -float(self.centering_max_step.get()), float(self.centering_max_step.get())))
+        dtilt = float(np.clip(ey / e, -float(self.centering_max_step.get()), float(self.centering_max_step.get())))
+
+        self._curr_pan  = float(self._curr_pan  + dpan)
+        self._curr_tilt = float(self._curr_tilt + dtilt)
+
         self.ctrl.send({
             "cmd":"move",
             "pan":  self._curr_pan,
