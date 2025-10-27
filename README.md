@@ -65,5 +65,7 @@ control for https://www.waveshare.com/2-axis-pan-tilt-camera-module.htm
 
 추가 연구 필요사항
 1. 레이저 조준하는 알고리즘.
+(지금생각중인건 1차 조준 후에 레이저 깜빡이는걸로 한번 인식해서 그 px 차이만큼 조준하는 방식?
+생각중)
 2. 여러개일때 객체 따로 인식하는 알고리즘.
 
