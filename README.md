@@ -56,6 +56,7 @@ control for https://www.waveshare.com/2-axis-pan-tilt-camera-module.htm
 1. 서버 ip 일일히 지정하지말고 서버에접속한 ip 확인해서 하기(가능하면 불가능하면 기존그대로 진행).
 2. calib, yolo 같은거 최초에 코드적으로 지정하게 하고 추가 지정하게 바꾸기 ㅡㅡ 개귀찮음.
 3. 쓸대없는 코드 싹다 밀어버리기 이제 디버깅 필요없으니까.
+4. 코드를 두개짜야할거같아 실제 바로 할거랑 테스트용이랑 실제는 스캔 > 조정 바로되는거로 해야할거같은데
 
 
 디렉토리 정리할거
@@ -65,3 +66,4 @@ control for https://www.waveshare.com/2-axis-pan-tilt-camera-module.htm
 추가 연구 필요사항
 1. 레이저 조준하는 알고리즘.
 2. 여러개일때 객체 따로 인식하는 알고리즘.
+
