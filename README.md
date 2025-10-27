@@ -69,3 +69,18 @@ control for https://www.waveshare.com/2-axis-pan-tilt-camera-module.htm
 생각중)
 2. 여러개일때 객체 따로 인식하는 알고리즘.
 
+Repo 정리(2025-10-27)
+
+1. Com. Server. Raspverrypi. 는 그대로 냅두기
+
+2. pointing~ 디렉들 ---> Fall_Paper_Datatset
+내용 : 추계에 썼던 테스트 데이터셋들과 pointing 디버깅 데이터
+
+3. angle_velocity --> Fall_Paper_Dataset
+내용 : pan 과 px_w ,tilt와 px_h 와 선형인지 분석했던 코드와 데이터셋(angle_velocity_data)
+
+4. Dataset --> Yolo 로 이름변경
+내용 : 학습했던 Yolo 모델들 자료
+
+5. Testset --> Calibration 으로 이름변경
+내용 : chess data 자료
