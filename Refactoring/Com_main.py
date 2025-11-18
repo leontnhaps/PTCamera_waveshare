@@ -97,6 +97,7 @@ class App:
 
         print(f"[INFO] Processors initialized")
         print(f"[INFO] UndistortProcessor ready, YOLOProcessor ready")
+        self._auto_load_files()
         # top bar
         top = Frame(root); top.pack(fill="x", padx=10, pady=6)
         Button(top, text="한장 찍기 (Snap)", command=self.snap_one).pack(side="left", padx=(0,8))
@@ -304,6 +305,44 @@ class App:
 
         for c in range(4):
             tab_point.grid_columnconfigure(c, weight=1)
+    def _auto_load_files(self):
+        """시작 시 calibration과 YOLO 파일 자동 로드"""
+        import os
+        
+        # Calibration 파일 자동 로드
+        if config.auto_load.AUTO_LOAD_CALIB:
+            calib_path = config.auto_load.CALIB_NPZ_PATH
+            print(f"[AUTO] Trying to load calib: {calib_path}")
+            
+            if os.path.exists(calib_path):
+                success = self.undistort_processor.load_calibration(calib_path)
+                if success:
+                    print(f"[AUTO] ✅ Calibration loaded successfully!")
+                    ui_q.put(("toast", f"✅ 자동 로드: 보정 파일 ({os.path.basename(calib_path)})"))
+                else:
+                    print(f"[AUTO] ❌ Calibration load failed")
+                    ui_q.put(("toast", f"❌ 보정 파일 로드 실패"))
+            else:
+                print(f"[AUTO] ⚠️ Calibration file not found: {calib_path}")
+                ui_q.put(("toast", f"⚠️ 보정 파일 없음: {os.path.basename(calib_path)}"))
+
+        # YOLO 가중치 자동 로드
+        if config.auto_load.AUTO_LOAD_YOLO:
+            yolo_path = config.auto_load.YOLO_WEIGHTS_PATH
+            print(f"[AUTO] Trying to load YOLO: {yolo_path}")
+            
+            if os.path.exists(yolo_path):
+                success = self.yolo_processor.load_model(yolo_path)
+                if success:
+                    self.yolo_wpath.set(yolo_path)  # GUI에 경로 표시
+                    print(f"[AUTO] ✅ YOLO loaded successfully!")
+                    ui_q.put(("toast", f"✅ 자동 로드: YOLO 모델 ({os.path.basename(yolo_path)})"))
+                else:
+                    print(f"[AUTO] ❌ YOLO load failed")
+                    ui_q.put(("toast", f"❌ YOLO 모델 로드 실패"))
+            else:
+                print(f"[AUTO] ⚠️ YOLO file not found: {yolo_path}")
+                ui_q.put(("toast", f"⚠️ YOLO 파일 없음: {os.path.basename(yolo_path)}"))
     # ===== 언디스토트 관련 메서드들 =====
     def load_npz(self):
         """보정 파일 로드"""

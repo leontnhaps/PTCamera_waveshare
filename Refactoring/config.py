@@ -17,10 +17,12 @@ PI_SERVER_HOST = PI_SERVER_HOST_711A   # 현재 사용할 IP
 AGENT_CTRL_PORT = 7500         # 원래 pc_server.py의 AGENT_CTRL_PORT
 AGENT_IMG_PORT = 7501          # 원래 pc_server.py의 AGENT_IMG_PORT
 
+
 # ============== 카메라/하드웨어 설정 ==============
 SERIAL_BAUD = 115200           # 원래 pi_agent.py의 BAUD
 MAX_WIDTH = 2592               # 원래 pi_agent.py의 MAX_W
 MAX_HEIGHT = 1944              # 원래 pi_agent.py의 MAX_H
+
 
 # ============== 폴더 설정 ==============
 def get_gui_output_dir():
@@ -30,3 +32,17 @@ def get_gui_output_dir():
 def get_server_output_dir():  
     """서버 캡처 폴더"""
     return Path(f"captures_server_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+
+class AutoLoadPaths:
+    """시작시 자동으로 로드할 파일들의 경로"""
+    
+    # ✅ 실제 파일 경로로 바꿔주세요!
+    CALIB_NPZ_PATH = r"C:\Users\gmlwn\OneDrive\바탕 화면\ICon1학년\OpticalWPT\PTCamera_waveshare\calib.npz"
+    YOLO_WEIGHTS_PATH = r"C:\Users\gmlwn\OneDrive\바탕 화면\ICon1학년\OpticalWPT\PTCamera_waveshare\yolov11m.pt"
+    
+    # 자동 로드 활성화/비활성화 (False로 하면 기존처럼 수동 선택)
+    AUTO_LOAD_CALIB = True   # True = 자동 로드, False = 수동 선택
+    AUTO_LOAD_YOLO = True    # True = 자동 로드, False = 수동 선택
+
+# 전역 인스턴스 생성
+auto_load = AutoLoadPaths()
