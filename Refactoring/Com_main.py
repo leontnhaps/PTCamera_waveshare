@@ -189,8 +189,8 @@ class App:
         self.point_min_samples = IntVar(value=2)     # 각 선형피팅 최소 샘플 수
         self.point_pan_target  = DoubleVar(value=0.0)
         self.point_tilt_target = DoubleVar(value=0.0)
-        self.point_speed  = IntVar(value=self.speed.get())  # Scan 속도 기본 재사용
-        self.point_acc    = DoubleVar(value=self.acc.get())
+        self.point_speed  = IntVar(value=100)     # ✅ 기본값 사용
+        self.point_acc    = DoubleVar(value=1.0)  # ✅ 기본값 사용
 
         Label(tab_point, text="CSV 경로").grid(row=0, column=0, sticky="w", padx=4, pady=4)
         ttk.Entry(tab_point, width=52, textvariable=self.point_csv_path)\
@@ -755,7 +755,6 @@ class App:
                             "fps": self.preview_fps.get(),
                             "quality": self.preview_q.get()})
 
-    # NEW: one-shot capture
     def snap_one(self):
         self._resume_preview_after_snap = False
         if self.preview_enable.get():
@@ -764,11 +763,11 @@ class App:
         fname = datetime.now().strftime("snap_%Y%m%d_%H%M%S.jpg")
         self.ctrl.send({
             "cmd":"snap",
-            "width":  self.width.get(),
-            "height": self.height.get(),
-            "quality":self.quality.get(),
+            "width":  self.scan_panel.width.get(),      # ✅ 패널에서 가져오기
+            "height": self.scan_panel.height.get(),     # ✅ 패널에서 가져오기
+            "quality":self.scan_panel.quality.get(),    # ✅ 패널에서 가져오기
             "save":   fname,
-            "hard_stop": self.hard_stop.get()
+            "hard_stop": self.scan_panel.hard_stop.get() # ✅ 패널에서 가져오기
         })
 
     # event loop
@@ -810,9 +809,10 @@ class App:
                         if name: self.scan_panel.last_lbl.config(text=f"Last: {name}")
                     elif et == "progress":
                         done=int(evt.get("done",0)); total=int(evt.get("total",0))
-                        self.prog.configure(value=done); self.prog_lbl.config(text=f"{done} / {total}")
+                        self.scan_panel.prog.configure(value=done)
+                        self.scan_panel.prog_lbl.config(text=f"{done} / {total}")  # ✅ 패널에서 가져오기
                         name = evt.get("name","")
-                        if name: self.last_lbl.config(text=f"Last: {name}")
+                        if name: self.scan_panel.last_lbl.config(text=f"Last: {name}")  # ✅ 패널에서 가져오기
                     elif et == "done":
                         # === CSV 닫기 ===
                         if self._scan_csv_file:

@@ -1,5 +1,5 @@
 # gui_panels.py
-from tkinter import Frame, Label, Button, Scale, HORIZONTAL, IntVar, DoubleVar
+from tkinter import Frame, Label, Button, Scale, HORIZONTAL, IntVar, DoubleVar, BooleanVar
 from tkinter import ttk
 
 class ManualPanel(Frame):
