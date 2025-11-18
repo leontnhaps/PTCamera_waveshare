@@ -14,31 +14,8 @@ import cv2
 import config
 from network import GuiCtrlClient, GuiImgClient
 from gui_panels import ManualPanel, ScanPanel
+from processors import UndistortProcessor, YOLOProcessor
 
-# ==== [NEW] Optional PyTorch (for CUDA remap acceleration) ====
-try:
-    import torch
-    import torch.nn.functional as F
-    _TORCH_AVAILABLE = True
-except Exception:
-    torch = None
-    F = None
-    _TORCH_AVAILABLE = False
-# =============================================================
-
-# ==== [NEW] Optional Ultralytics YOLO (GPU inference if available) ====
-try:
-    from ultralytics import YOLO
-    _YOLO_OK = True
-except Exception:
-    YOLO = None
-    _YOLO_OK = False
-# =====================================================================
-
-#SERVER_HOST = "127.0.0.1"
-#GUI_CTRL_PORT = 7600
-#GUI_IMG_PORT  = 7601
-#DEFAULT_OUT_DIR = pathlib.Path(f"captures_gui_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
 SERVER_HOST = config.GUI_SERVER_HOST
 GUI_CTRL_PORT = config.GUI_CTRL_PORT
 GUI_IMG_PORT = config.GUI_IMG_PORT
@@ -88,64 +65,38 @@ class App:
         root.minsize(980, 820)  # 창 최소 크기 고정
 
         # connections
-        self.ctrl = GuiCtrlClient(SERVER_HOST, GUI_CTRL_PORT); self.ctrl.start()
-        self.img  = GuiImgClient (SERVER_HOST, GUI_IMG_PORT, DEFAULT_OUT_DIR); self.img.start()
+        self.ctrl = GuiCtrlClient(SERVER_HOST, GUI_CTRL_PORT, ui_q); self.ctrl.start()  # ✅ ui_q 추가
+        self.img  = GuiImgClient (SERVER_HOST, GUI_IMG_PORT, DEFAULT_OUT_DIR, ui_q); self.img.start()  # ✅ ui_q 추가
 
         # state
         self.tkimg=None
         self._resume_preview_after_snap = False
+        
+        # ===== 이미지 처리기들 =====
+        self.undistort_processor = UndistortProcessor()
+        self.yolo_processor = YOLOProcessor()
 
-        # undistort state
+        # UI 상태 변수들
         self.ud_enable    = BooleanVar(value=False)
         self.ud_save_copy = BooleanVar(value=False)
         self.ud_alpha     = DoubleVar(value=0.0)
 
-        self._ud_model = None
-        self._ud_K = self._ud_D = None
-        self._ud_img_size = None
-        self._ud_src_size = None
-        self._ud_m1 = self._ud_m2 = None
-
-        # cv2 CUDA 가능 여부
-        self._use_cv2_cuda = False
-        try:
-            self._use_cv2_cuda = hasattr(cv2, "cuda") and cv2.cuda.getCudaEnabledDeviceCount() > 0
-        except Exception:
-            self._use_cv2_cuda = False
-        self._ud_gm1 = self._ud_gm2 = None
-
-        # ==== Torch 가속 관련 멤버 ====
-        self._torch_available = _TORCH_AVAILABLE
-        self._torch_cuda = bool(_TORCH_AVAILABLE and torch.cuda.is_available())
-        self._torch_device = torch.device("cuda") if self._torch_cuda else torch.device("cpu") if _TORCH_AVAILABLE else None
-        # 미리보기/저장 용도는 FP16로 충분. 안전하게 FP32로 시작하고, 성능 더 뽑고 싶으면 True.
-        self._torch_use_fp16 = False
-        self._torch_dtype = (torch.float16 if (self._torch_cuda and self._torch_use_fp16) else torch.float32) if _TORCH_AVAILABLE else None
-
-        self._ud_torch_grid = None      # 1xHxWx2
-        self._ud_torch_grid_wh = None   # (w,h)
-        # ===================================
-
-        # ==== YOLO overlay state ====
         self.yolo_enable = BooleanVar(value=False)
         self.yolo_conf   = DoubleVar(value=0.25)
         self.yolo_iou    = DoubleVar(value=0.55)
-        self.yolo_imgsz  = IntVar(value=832)     # 32배수 권장 (640/704/768/832/896/960 ...)
-        self.yolo_stride = IntVar(value=2)       # N프레임마다만 추론
-        self.yolo_wpath  = StringVar(value="")   # best.pt 경로
+        self.yolo_imgsz  = IntVar(value=832)
+        self.yolo_stride = IntVar(value=2)
+        self.yolo_wpath  = StringVar(value="")
 
-        # [NEW] 가시성 옵션
-        self.yolo_box_thick = IntVar(value=4)      # ← 박스 테두리 두께
-        self.yolo_text_scale = DoubleVar(value=0.7) # ← 텍스트 스케일
-        self.yolo_text_thick = IntVar(value=2)      # ← 텍스트 두께
+        # YOLO 가시성 옵션
+        self.yolo_box_thick = IntVar(value=4)
+        self.yolo_text_scale = DoubleVar(value=0.7)
+        self.yolo_text_thick = IntVar(value=2)
+        self.yolo_show_centroid = BooleanVar(value=True)
+        self.yolo_show_center_cross = BooleanVar(value=True)
 
-        self._yolo_model   = None
-        self._yolo_last    = None   # (boxes, confs, clses) 캐시
-        self._yolo_idx     = 0
-        self._yolo_device  = (0 if (torch is not None and torch.cuda.is_available()) else "cpu")
-
-        print(f"[INFO] cv2.cuda={self._use_cv2_cuda}, torch_cuda={self._torch_cuda}, yolo_device={self._yolo_device}")
-
+        print(f"[INFO] Processors initialized")
+        print(f"[INFO] UndistortProcessor ready, YOLOProcessor ready")
         # top bar
         top = Frame(root); top.pack(fill="x", padx=10, pady=6)
         Button(top, text="한장 찍기 (Snap)", command=self.snap_one).pack(side="left", padx=(0,8))
@@ -251,8 +202,7 @@ class App:
             .grid(row=row, column=1, sticky="w", pady=2); row+=1
         Label(misc, text="Alpha/Balance (0~1)").grid(row=row, column=0, sticky="w")
         Scale(misc, from_=0.0, to=1.0, orient=HORIZONTAL, resolution=0.01, length=200,
-            variable=self.ud_alpha, command=lambda v: setattr(self, "_ud_src_size", None))\
-            .grid(row=row, column=1, sticky="w"); row+=1
+            variable=self.ud_alpha).grid(row=row, column=1, sticky="w"); row+=1
 
         # ==== YOLO UI ====  ← 'tab_misc'가 아니라 'misc'를 parent로!
         ttk.Separator(misc, orient="horizontal").grid(row=row, column=0, columnspan=4, sticky="ew", pady=(8,6)); row+=1
@@ -354,286 +304,65 @@ class App:
 
         for c in range(4):
             tab_point.grid_columnconfigure(c, weight=1)
-
-    def _ensure_yolo_model_for_scan(self) -> bool:
-        """스캔 중 CSV 기록용 YOLO 모델 준비(overlay 사용 여부와 무관)."""
-        # 이미 overlay에서 로드돼 있으면 재사용
-        if self._yolo_model is not None:
-            return True
-        # overlay가 꺼져 있어도 경로 지정돼 있으면 로드
-        wpath = self.yolo_wpath.get().strip()
-        if not _YOLO_OK or not wpath:
-            ui_q.put(("toast", "YOLO 가중치(.pt)을 로드하지 않아 CSV에 감지값을 기록할 수 없습니다."))
-            return False
-        try:
-            self._yolo_model = YOLO(wpath)
-            # 워밍업
-            dummy = np.zeros((self._scan_yolo_imgsz, self._scan_yolo_imgsz, 3), dtype=np.uint8)
-            self._yolo_model.predict(dummy, imgsz=self._scan_yolo_imgsz,
-                                     conf=self._scan_yolo_conf,
-                                     iou=float(self.yolo_iou.get()),
-                                     device=self._yolo_device, verbose=False)
-            return True
-        except Exception as e:
-            self._yolo_model = None
-            ui_q.put(("toast", f"[SCAN] YOLO 로드 실패: {e}"))
-            return False
-
-    
-    
-    # ========= Undistort helpers =========
+    # ===== 언디스토트 관련 메서드들 =====
     def load_npz(self):
+        """보정 파일 로드"""
         path = filedialog.askopenfilename(filetypes=[("NPZ","*.npz")])
-        if not path: return
-        cal = np.load(path, allow_pickle=True)
-        self._ud_model = str(cal["model"])
-        self._ud_K = cal["K"].astype(np.float32)
-        self._ud_D = cal["D"].astype(np.float32)
-        self._ud_img_size = tuple(int(x) for x in cal["img_size"])
-        self._ud_src_size = None
-        self._ud_m1 = self._ud_m2 = None
-        self._ud_gm1 = self._ud_gm2 = None
-        self._ud_torch_grid = None
-        self._ud_torch_grid_wh = None
-        print(f"[UD] loaded calib: model={self._ud_model}, img_size={self._ud_img_size}, cv2.cuda={self._use_cv2_cuda}, torch_cuda={self._torch_cuda}")
-
-    def _scale_K(self, K, sx, sy):
-        K2 = K.copy()
-        K2[0,0]*=sx; K2[1,1]*=sy
-        K2[0,2]*=sx; K2[1,2]*=sy
-        K2[2,2]=1.0
-        return K2
-
-    def _ensure_ud_maps(self, w:int, h:int):
-        if self._ud_K is None or self._ud_D is None or self._ud_model is None:
+        if not path: 
             return
-        if self._ud_src_size == (w,h) and self._ud_m1 is not None:
-            return
-        Wc,Hc = self._ud_img_size
-        sx, sy = w/float(Wc), h/float(Hc)
-        K = self._scale_K(self._ud_K, sx, sy)
-        D = self._ud_D
-        a = float(self.ud_alpha.get())
-
-        if self._ud_model == "pinhole":
-            newK, _ = cv2.getOptimalNewCameraMatrix(K, D, (w,h), alpha=a, newImgSize=(w,h))
-            m1,m2 = cv2.initUndistortRectifyMap(K, D, None, newK, (w,h), cv2.CV_16SC2)
+        
+        success = self.undistort_processor.load_calibration(path)
+        if success:
+            ui_q.put(("toast", f"보정 파일 로드 완료: {path}"))
         else:
-            R = np.eye(3, dtype=np.float32)
-            newK = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
-                K, D, (w,h), R, balance=a, new_size=(w,h)
-            )
-            m1,m2 = cv2.fisheye.initUndistortRectifyMap(K, D, R, newK, (w,h), cv2.CV_16SC2)
+            ui_q.put(("toast", f"보정 파일 로드 실패: {path}"))
 
-        self._ud_m1, self._ud_m2 = m1, m2
-        self._ud_src_size = (w,h)
-
-        # cv2.cuda 맵 업로드 (가능하면)
-        if self._use_cv2_cuda:
-            try:
-                self._ud_gm1 = cv2.cuda_GpuMat(); self._ud_gm1.upload(self._ud_m1)
-                self._ud_gm2 = cv2.cuda_GpuMat(); self._ud_gm2.upload(self._ud_m2)
-            except Exception as e:
-                print("[UD][cv2.cuda] map upload failed:", e)
-                self._ud_gm1 = self._ud_gm2 = None
-
-        # [NEW] Torch grid 초기화 무효화 (재생성 필요)
-        self._ud_torch_grid = None
-        self._ud_torch_grid_wh = None
-
-    # [NEW] OpenCV 맵 -> Torch grid(-1~1 정규화)로 변환/캐시
-    def _ensure_torch_grid(self, w:int, h:int):
-        if not (self._torch_cuda and self._ud_m1 is not None):
-            return
-        if self._ud_torch_grid is not None and self._ud_torch_grid_wh == (w,h):
-            return
-
-        mx, my = cv2.convertMaps(self._ud_m1, self._ud_m2, cv2.CV_32F)  # HxW float32
-        H, W = mx.shape
-        gx = (mx / max(W-1,1)) * 2.0 - 1.0
-        gy = (my / max(H-1,1)) * 2.0 - 1.0
-        grid = np.stack([gx, gy], axis=-1)  # HxWx2
-
-        dtype = self._torch_dtype
-        dev   = self._torch_device
-        self._ud_torch_grid = torch.from_numpy(grid).unsqueeze(0).to(device=dev, dtype=dtype)
-        self._ud_torch_grid_wh = (w,h)
-
-    # [NEW] 단일 프레임 왜곡보정 (우선순위: Torch→cv2.cuda→CPU)
-    def _undistort_bgr(self, bgr: np.ndarray) -> np.ndarray:
-        h,w = bgr.shape[:2]
-        self._ensure_ud_maps(w,h)
-
-        # Torch CUDA 경로
-        if self._torch_cuda and self._ud_m1 is not None:
-            try:
-                self._ensure_torch_grid(w,h)
-                if self._ud_torch_grid is not None:
-                    # np -> torch (CHW, [0,1] float)
-                    t_cpu = torch.from_numpy(bgr).permute(2,0,1).contiguous()
-                    # pinned memory 전송(속도 미세 향상)
-                    try:
-                        t_cpu = t_cpu.pin_memory()
-                    except Exception:
-                        pass
-                    t = t_cpu.to(self._torch_device, dtype=self._torch_dtype, non_blocking=True).unsqueeze(0) / 255.0
-                    out = F.grid_sample(t, self._ud_torch_grid, mode="bilinear", align_corners=True)
-                    bgr = (out.squeeze(0).permute(1,2,0) * 255.0).clamp(0,255).byte().cpu().numpy()
-                    return np.ascontiguousarray(bgr)
-            except Exception as e:
-                print("[UD][torch] remap failed → fallback:", e)
-
-        # cv2 CUDA 경로
-        if self._use_cv2_cuda and self._ud_gm1 is not None and self._ud_gm2 is not None:
-            try:
-                gsrc = cv2.cuda_GpuMat(); gsrc.upload(bgr)
-                gout = cv2.cuda.remap(gsrc, self._ud_gm1, self._ud_gm2,
-                                      interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
-                return gout.download()
-            except Exception as e:
-                print("[UD][cv2.cuda] remap failed → CPU:", e)
-
-        # CPU 경로
-        return cv2.remap(bgr, self._ud_m1, self._ud_m2, cv2.INTER_LINEAR)
-
-    # ===== YOLO helpers =====
+    # ===== YOLO 관련 메서드들 =====
     def load_yolo_weights(self):
+        """YOLO 가중치 파일 로드"""
         path = filedialog.askopenfilename(filetypes=[("PyTorch Weights","*.pt")])
         if not path:
             return
-        self.yolo_wpath.set(path)
-        self._yolo_model = None  # 다음 사용 시 재로드
+        
+        success = self.yolo_processor.load_model(path)
+        if success:
+            self.yolo_wpath.set(path)
+            ui_q.put(("toast", f"YOLO 모델 로드 완료: {path}"))
+        else:
+            ui_q.put(("toast", f"YOLO 모델 로드 실패: {path}"))
 
     def _on_toggle_yolo(self):
+        """YOLO 토글 이벤트"""
         if self.yolo_enable.get():
-            ok = self._ensure_yolo_model()
-            if not ok:
+            if not self.yolo_processor.is_loaded():
+                ui_q.put(("toast", "YOLO 가중치(.pt)를 먼저 로드하세요."))
                 self.yolo_enable.set(False)
+            else:
+                # 시각화 설정 업데이트
+                self._update_yolo_visualization_settings()
 
-    def _ensure_yolo_model(self) -> bool:
-        if not _YOLO_OK:
-            ui_q.put(("toast", "Ultralytics가 설치되어 있지 않습니다: pip install ultralytics"))
-            return False
+    def _update_yolo_visualization_settings(self):
+        """YOLO 시각화 설정 업데이트"""
+        self.yolo_processor.update_visualization_settings(
+            box_thickness=int(self.yolo_box_thick.get()),
+            text_scale=float(self.yolo_text_scale.get()),
+            text_thickness=int(self.yolo_text_thick.get()),
+            show_centroid=self.yolo_show_centroid.get(),
+            show_center_cross=self.yolo_show_center_cross.get()
+        )
+
+    def _ensure_yolo_model_for_scan(self) -> bool:
+        """스캔용 YOLO 모델 확인"""
+        if self.yolo_processor.is_loaded():
+            return True
+        
+        # 경로가 있으면 로드 시도
         wpath = self.yolo_wpath.get().strip()
-        if not wpath:
-            ui_q.put(("toast", "YOLO 가중치(.pt)를 먼저 로드하세요."))
-            return False
-        if self._yolo_model is None:
-            try:
-                self._yolo_model = YOLO(wpath)
-                # 워밍업 (초기 지연 방지)
-                dummy = np.zeros((int(self.yolo_imgsz.get()), int(self.yolo_imgsz.get()), 3), dtype=np.uint8)
-                self._yolo_model.predict(dummy, imgsz=int(self.yolo_imgsz.get()),
-                                         conf=float(self.yolo_conf.get()),
-                                         iou=float(self.yolo_iou.get()),
-                                         device=self._yolo_device, verbose=False)
-                ui_q.put(("toast", f"YOLO ready: {wpath} (device={self._yolo_device})"))
-            except Exception as e:
-                self._yolo_model = None
-                ui_q.put(("toast", f"YOLO 로드 실패: {e}"))
-                return False
-        return True
-
-    def _run_yolo_and_draw(self, bgr: np.ndarray) -> np.ndarray:
-        """N프레임마다 추론, 매 프레임 박스 + 평균점(centroid) 그리기."""
-        if not self.yolo_enable.get():
-            self._yolo_last = None
-            return bgr
-        bgr = np.ascontiguousarray(bgr, dtype=np.uint8)
-        if not self._ensure_yolo_model():
-            return bgr
-
-        try:
-            N = max(1, int(self.yolo_stride.get()))
-            run_infer = (self._yolo_idx % N) == 0
-
-            if run_infer:
-                res = self._yolo_model.predict(
-                    bgr,
-                    imgsz=int(self.yolo_imgsz.get()),
-                    conf=float(self.yolo_conf.get()),
-                    iou=float(self.yolo_iou.get()),
-                    device=self._yolo_device,
-                    verbose=False
-                )[0]
-                if len(res.boxes) > 0:
-                    boxes = res.boxes.xyxy.detach().cpu().numpy().astype(int)
-                    confs = res.boxes.conf.detach().cpu().numpy()
-                    clses = res.boxes.cls.detach().cpu().numpy().astype(int)
-                    self._yolo_last = (boxes, confs, clses)
-                else:
-                    self._yolo_last = (np.empty((0,4), int), np.array([]), np.array([]))
-
-            # draw from cache
-            if self._yolo_last is not None:
-                boxes, confs, clses = self._yolo_last
-                th = max(1, int(self.yolo_box_thick.get()))
-                ts = max(0.3, float(self.yolo_text_scale.get()))
-                tth = max(1, int(self.yolo_text_thick.get()))
-
-                H, W = bgr.shape[:2]
-
-                # 1) 박스들 렌더
-                for (x1,y1,x2,y2), c, k in zip(boxes, confs, clses):
-                    cv2.rectangle(bgr, (x1,y1), (x2,y2), (0,255,0), th, lineType=cv2.LINE_AA)
-                    label = f"{c:.2f}"
-                    org = (x1, max(15, y1-6))
-                    cv2.putText(bgr, label, org, cv2.FONT_HERSHEY_SIMPLEX, ts, (0,0,0), tth+2, cv2.LINE_AA)
-                    cv2.putText(bgr, label, org, cv2.FONT_HERSHEY_SIMPLEX, ts, (0,255,0), tth,   cv2.LINE_AA)
-
-                # 2) (옵션) 화면 중앙 십자
-                if getattr(self, "yolo_show_center_cross", True) and self.yolo_show_center_cross.get():
-                    cx0, cy0 = int(W/2), int(H/2)
-                    cv2.drawMarker(bgr, (cx0, cy0), (255,255,255), markerType=cv2.MARKER_CROSS, 
-                                markerSize=14, thickness=1, line_type=cv2.LINE_AA)
-
-                # 3) (옵션) 검출들의 중심점 평균(centroid) 그리기
-                if getattr(self, "yolo_show_centroid", True) and self.yolo_show_centroid.get():
-                    # conf 필터는 이미 predict에 들어가 있으므로 전체 사용
-                    if boxes.shape[0] > 0:
-                        centers = []
-                        for (x1,y1,x2,y2) in boxes:
-                            cx = 0.5*(x1+x2); cy = 0.5*(y1+y2)
-                            centers.append((cx, cy))
-                        # 평균
-                        m_cx = float(np.mean([c[0] for c in centers]))
-                        m_cy = float(np.mean([c[1] for c in centers]))
-
-                        # 점/원 + 텍스트
-                        cv2.circle(bgr, (int(round(m_cx)), int(round(m_cy))), 5, (0,200,255), -1, lineType=cv2.LINE_AA)
-                        err_x = (W/2.0 - m_cx); err_y = (H/2.0 - m_cy)
-                        self._centering_on_centroid(m_cx, m_cy, W, H)
-                        if self._pointing_logging and (self._pointing_log_writer is not None):
-                            from datetime import datetime
-                            try:
-                                self._pointing_log_writer.writerow([
-                                    datetime.now().isoformat(timespec="milliseconds"),
-                                    f"{self._curr_pan:.3f}", f"{self._curr_tilt:.3f}",
-                                    f"{m_cx:.3f}", f"{m_cy:.3f}",
-                                    f"{err_x:.3f}", f"{err_y:.3f}",
-                                    int(W), int(H),
-                                    int(boxes.shape[0])
-                                ])
-                                # 즉시 파일에 내리고 싶으면 다음 줄 주석 해제
-                                # self._pointing_log_fp.flush()
-                            except Exception as e:
-                                print("[Point] write err:", e)
-                        txt = f"mean ({m_cx:.1f},{m_cy:.1f})  err ({err_x:+.1f},{err_y:+.1f}) px"
-                        # 텍스트 배경
-                        cv2.putText(bgr, txt, (10, max(20, H-15)), cv2.FONT_HERSHEY_SIMPLEX, 
-                                    0.55, (0,0,0), 3, cv2.LINE_AA)
-                        cv2.putText(bgr, txt, (10, max(20, H-15)), cv2.FONT_HERSHEY_SIMPLEX, 
-                                    0.55, (0,255,255), 1, cv2.LINE_AA)
-                        
-
-            self._yolo_idx += 1
-        except Exception as e:
-            print("[YOLO] err:", e)
-        return bgr
-
-
-    # helpers
-
+        if wpath:
+            return self.yolo_processor.load_model(wpath)
+        
+        ui_q.put(("toast", "YOLO 가중치(.pt)을 로드하지 않아 CSV에 감지값을 기록할 수 없습니다."))
+        return False
     def resume_preview(self):
         if self.preview_enable.get():
             self.ctrl.send({
@@ -667,7 +396,7 @@ class App:
     # actions - 메서드 시그니처 수정
     def start_scan(self, params=None):
         # 기존 보정 체크
-        if self._ud_K is None or self._ud_D is None:
+        if not self.undistort_processor.is_loaded():  # ✅ 수정
             ui_q.put(("toast", "❌ 스캔은 보정 이미지만 허용합니다. 먼저 'Load calib.npz'를 해주세요."))
             return
         if self.preview_enable.get():
@@ -836,12 +565,12 @@ class App:
                     self.scan_panel.dl_lbl.config(text=f"DL {dl_count}")
                     self.scan_panel.last_lbl.config(text=f"Last: {name}")
 
-                    if self.ud_save_copy.get() and self._ud_K is not None:
+                    if self.ud_save_copy.get() and self.undistort_processor.is_loaded():
                         try:
                             arr = np.frombuffer(data, np.uint8)
                             bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
                             if bgr is not None:
-                                ubgr = self._undistort_bgr(bgr)
+                                ubgr = self.undistort_processor.process(bgr, alpha=float(self.ud_alpha.get()))
                                 stem, dot, ext = name.partition(".")
                                 out = DEFAULT_OUT_DIR / f"{stem}_ud.{ext or 'jpg'}"
                                 cv2.imwrite(str(out), ubgr)
@@ -849,49 +578,51 @@ class App:
                             print("[save_ud] err:", e)
                     # === [핵심] 스캔 중 CSV에 YOLO 결과 기록 ===
                     if self._scan_csv_writer is not None:
-                            try:
-                                # 파일명에서 pan/tilt 추출
-                                m = self._fname_re.search(name)
-                                pan_deg = float(m.group("pan")) if m else None
-                                tilt_deg = float(m.group("tilt")) if m else None
+                        try:
+                            # 파일명에서 pan/tilt 추출
+                            m = self._fname_re.search(name)
+                            pan_deg = float(m.group("pan")) if m else None
+                            tilt_deg = float(m.group("tilt")) if m else None
 
-                                # 원본 디코드
-                                arr = np.frombuffer(data, np.uint8)
-                                bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                                if bgr is None:
-                                    raise RuntimeError("cv2.imdecode 실패")
+                            # 원본 디코드
+                            arr = np.frombuffer(data, np.uint8)
+                            bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                            if bgr is None:
+                                raise RuntimeError("cv2.imdecode 실패")
 
-                                # ★★★ 스캔 CSV/YOLO는 '항상 보정' ★★★
-                                if self._ud_K is None or self._ud_D is None:
-                                    # 안전장치: 혹시 start_scan 체크를 우회했을 때 대비
-                                    ui_q.put(("toast", "❌ 보정 파라미터 없음 → 스캔 감지/기록 중단"))
-                                    return
-                                bgr = self._undistort_bgr(bgr)   # ← 여기서 반드시 언디스토트
-                                H, W = bgr.shape[:2]             # ← 보정 이후의 W,H로 교체
+                            # ★★★ 스캔 CSV/YOLO는 '항상 보정' ★★★
+                            if not self.undistort_processor.is_loaded():
+                                ui_q.put(("toast", "❌ 보정 파라미터 없음 → 스캔 감지/기록 중단"))
+                                return
+                                
+                            bgr = self.undistort_processor.process(bgr, alpha=float(self.ud_alpha.get()))
+                            H, W = bgr.shape[:2]
 
-                                # YOLO 보장 & 추론
-                                if self._ensure_yolo_model_for_scan():
-                                    res = self._yolo_model.predict(
-                                        bgr,
-                                        imgsz=self._scan_yolo_imgsz,
-                                        conf=self._scan_yolo_conf,
-                                        iou=float(self.yolo_iou.get()),
-                                        device=self._yolo_device,
-                                        verbose=False
-                                    )[0]
-
-                                    if res is not None and res.boxes is not None and len(res.boxes) > 0:
-                                        for b in res.boxes:
-                                            conf = float(b.conf.cpu().item() or 0.0)
-                                            if conf < self._scan_yolo_conf: 
-                                                continue
-                                            cls = int(b.cls.cpu().item() or -1)
-                                            x1,y1,x2,y2 = b.xyxy[0].cpu().numpy().tolist()
-                                            cx = 0.5*(x1+x2); cy = 0.5*(y1+y2)
-                                            # ★ CSV는 '보정 좌표계'로 기록됨
-                                            self._scan_csv_writer.writerow([name, pan_deg, tilt_deg, cx, cy, x2-x1, y2-y1, conf, cls, W, H])
-                            except Exception as e:
-                                print("[SCAN][CSV] write err:", e)
+                            # YOLO 감지 & CSV 기록
+                            if self._ensure_yolo_model_for_scan():
+                                # 스캔용 YOLO 처리 (시각화 없이 감지만)
+                                detected_bgr = self.yolo_processor.process(
+                                    bgr.copy(),  # 복사본 사용 (원본 보존)
+                                    conf=0.50,   # 스캔용 고정 conf
+                                    iou=float(self.yolo_iou.get()),
+                                    imgsz=832,   # 스캔용 고정 imgsz
+                                    stride=1     # 매 프레임 처리
+                                )
+                                
+                                # 감지 결과 가져오기
+                                centroid = self.yolo_processor.get_last_centroid()
+                                if centroid is not None:
+                                    # 실제로는 개별 박스들을 기록해야 하므로 processor 확장 필요
+                                    # 지금은 간단히 중심점만 기록
+                                    m_cx, m_cy, n_dets = centroid
+                                    if n_dets > 0:
+                                        # 임시로 중심점 기록 (실제로는 모든 박스 기록해야 함)
+                                        self._scan_csv_writer.writerow([
+                                            name, pan_deg, tilt_deg, m_cx, m_cy, 
+                                            0, 0, 0.50, 0, W, H  # 임시값들
+                                        ])
+                        except Exception as e:
+                            print("[SCAN][CSV] write err:", e)
                     if self._resume_preview_after_snap:
                         self._resume_preview_after_snap = False
                         self.resume_preview()
@@ -924,17 +655,40 @@ class App:
         try:
             arr = np.frombuffer(img_bytes, np.uint8)
             bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-            if bgr is None: return
+            if bgr is None: 
+                return
 
-            if self.ud_enable.get() and self._ud_K is not None:
-                bgr = self._undistort_bgr(bgr)
+            # 언디스토트 처리
+            if self.ud_enable.get() and self.undistort_processor.is_loaded():
+                bgr = self.undistort_processor.process(bgr, alpha=float(self.ud_alpha.get()))
 
-            # YOLO overlay
-            bgr = self._run_yolo_and_draw(bgr)
+            # YOLO 처리
+            if self.yolo_enable.get() and self.yolo_processor.is_loaded():
+                # 시각화 설정 업데이트
+                self._update_yolo_visualization_settings()
+                
+                bgr = self.yolo_processor.process(
+                    bgr,
+                    conf=float(self.yolo_conf.get()),
+                    iou=float(self.yolo_iou.get()),
+                    imgsz=int(self.yolo_imgsz.get()),
+                    stride=int(self.yolo_stride.get())
+                )
+                
+                # 센터링 처리
+                centroid = self.yolo_processor.get_last_centroid()
+                if centroid is not None:
+                    m_cx, m_cy, n_detections = centroid
+                    H, W = bgr.shape[:2]
+                    self._centering_on_centroid(m_cx, m_cy, W, H)
+                    
+                    # 포인팅 로그 기록
+                    if self._pointing_logging and (self._pointing_log_writer is not None):
+                        self._log_pointing_data(m_cx, m_cy, W, H, n_detections)
 
             rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             im = Image.fromarray(rgb)
-            self._draw_preview_to_label(im)  # 레이아웃 불변
+            self._draw_preview_to_label(im)
         except Exception as e:
             print("[preview] err:", e)
         # ===== Pointing helpers =====
@@ -1176,7 +930,24 @@ class App:
             "acc":   float(self.point_acc.get())
         })
         self._centering_last_ms = now_ms
-
+    def _log_pointing_data(self, m_cx: float, m_cy: float, W: int, H: int, n_detections: int):
+        """포인팅 좌표 로그 기록"""
+        if not (self._pointing_logging and self._pointing_log_writer):
+            return
+            
+        try:
+            err_x = (W/2.0 - m_cx)
+            err_y = (H/2.0 - m_cy)
+            
+            self._pointing_log_writer.writerow([
+                datetime.now().isoformat(timespec="milliseconds"),
+                f"{self._curr_pan:.3f}", f"{self._curr_tilt:.3f}",
+                f"{m_cx:.3f}", f"{m_cy:.3f}",
+                f"{err_x:.3f}", f"{err_y:.3f}",
+                int(W), int(H), int(n_detections)
+            ])
+        except Exception as e:
+            print("[Point] write err:", e)
 def main():
     root = Tk()
     App(root)

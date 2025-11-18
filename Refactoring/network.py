@@ -8,11 +8,12 @@ import pathlib
 class GuiCtrlClient(threading.Thread):
     """제어 명령 송수신 클라이언트 (Com_main.py에서 이동)"""
     
-    def __init__(self, host, port):
+    def __init__(self, host, port, ui_queue):
         super().__init__(daemon=True)
         self.host = host
         self.port = port
         self.sock = None
+        self.ui_queue = ui_queue
         
     def run(self):
         try:
@@ -21,9 +22,7 @@ class GuiCtrlClient(threading.Thread):
             s.connect((self.host, self.port))
             self.sock = s
             
-            # ui_q는 Com_main.py에서 import해야 함
-            from Com_main import ui_q
-            ui_q.put(("toast", f"CTRL connected {self.host}:{self.port}"))
+            self.ui_queue.put(("toast", f"CTRL connected {self.host}:{self.port}"))
             
             buf = b""
             while True:
@@ -43,10 +42,9 @@ class GuiCtrlClient(threading.Thread):
                         evt = json.loads(line)
                     except: 
                         continue
-                    ui_q.put(("evt", evt))
+                    self.ui_queue.put(("evt", evt))  # ✅ 수정
         except Exception as e:
-            from Com_main import ui_q
-            ui_q.put(("toast", f"CTRL err: {e}"))
+             self.ui_queue.put(("toast", f"CTRL err: {e}"))  # ✅ 수정
     
     def send(self, obj: dict):
         if not self.sock: 
@@ -57,12 +55,13 @@ class GuiCtrlClient(threading.Thread):
 class GuiImgClient(threading.Thread):
     """이미지 수신 클라이언트 (Com_main.py에서 이동)"""
     
-    def __init__(self, host, port, outdir: pathlib.Path):
+    def __init__(self, host, port, outdir, ui_queue):
         super().__init__(daemon=True)
         self.host = host
         self.port = port
         self.outdir = outdir
         self.sock = None
+        self.ui_queue = ui_queue
         
     def run(self):
         try:
@@ -70,8 +69,7 @@ class GuiImgClient(threading.Thread):
             s.connect((self.host, self.port))
             self.sock = s
             
-            from Com_main import ui_q
-            ui_q.put(("toast", f"IMG connected {self.host}:{self.port}"))
+            self.ui_queue.put(("toast", f"IMG connected {self.host}:{self.port}"))  # ✅ 수정
             
             while True:
                 hdr = s.recv(2)
@@ -92,12 +90,11 @@ class GuiImgClient(threading.Thread):
                 
                 data = bytes(buf)
                 if name.startswith("_preview_"):
-                    ui_q.put(("preview", data))
+                    self.ui_queue.put(("preview", data))  # ✅ 수정
                 else:
                     self.outdir.mkdir(parents=True, exist_ok=True)
                     with open(self.outdir / name, "wb") as f: 
                         f.write(data)
-                    ui_q.put(("saved", (name, data)))
+                    self.ui_queue.put(("saved", (name, data)))  # ✅ 수정
         except Exception as e:
-            from Com_main import ui_q
-            ui_q.put(("toast", f"IMG err: {e}"))
+            self.ui_queue.put(("toast", f"IMG err: {e}"))  # ✅ 수정
