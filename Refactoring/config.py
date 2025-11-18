@@ -11,7 +11,7 @@ GUI_IMG_PORT = 7601             # 원래 pc_gui.py의 GUI_IMG_PORT
 # Pi에서 서버로 연결할 때 사용  
 PI_SERVER_HOST_711A = "192.168.0.9"   # 711a (주석 그대로 유지)
 PI_SERVER_HOST_602A = "172.30.1.100"  # 602a (현재 사용중)
-PI_SERVER_HOST = PI_SERVER_HOST_602A   # 현재 사용할 IP
+PI_SERVER_HOST = PI_SERVER_HOST_711A   # 현재 사용할 IP
 
 # 서버에서 사용하는 포트들
 AGENT_CTRL_PORT = 7500         # 원래 pc_server.py의 AGENT_CTRL_PORT
