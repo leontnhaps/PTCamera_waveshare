@@ -9,10 +9,19 @@ Pi Agent — 라즈베리파이 카메라 제어 + PC 브로커(pc_server.py)와
 import os, io, json, time, glob, threading, datetime, socket, struct
 import serial
 from picamera2 import Picamera2
+import RPi.GPIO as GPIO
+
+# ===================== GPIO 설정 (레이저 제어) =====================
+LASER_PIN = 15  # BCM 15번 핀 (물리적 핀 10번)
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(LASER_PIN, GPIO.OUT)
+GPIO.output(LASER_PIN, GPIO.LOW)  # 초기 상태: OFF
+print(f"[GPIO] Laser control initialized on BCM pin {LASER_PIN}")
 
 # ===================== 환경 설정 =====================
-DEFAULT_SERVER_HOST = "192.168.0.9" # 711a
+#DEFAULT_SERVER_HOST = "192.168.0.9" # 711a
 #DEFAULT_SERVER_HOST = "172.30.1.100" # 602a
+DEFAULT_SERVER_HOST = "10.95.38.118" # hotspot
 SERVER_HOST = os.getenv("SERVER_HOST", DEFAULT_SERVER_HOST)   # 노트북/PC 서버 IP
 CTRL_PORT   = int(os.getenv("CTRL_PORT", "7500"))
 IMG_PORT    = int(os.getenv("IMG_PORT",  "7501"))
@@ -277,6 +286,15 @@ def main():
             elif c == "led":
                 val = int(cmd.get("value",0))
                 send_to_slave({"T":132, "IO4": val, "IO5": val})
+            elif c == "laser":
+                # 레이저 제어 (GPIO 15번 핀)
+                val = int(cmd.get("value", 0))
+                if val == 1:
+                    GPIO.output(LASER_PIN, GPIO.HIGH)
+                    print("[LASER] ON")
+                else:
+                    GPIO.output(LASER_PIN, GPIO.LOW)
+                    print("[LASER] OFF")
             elif c == "preview":
                 enable = bool(cmd.get("enable", True))
                 if enable:
@@ -291,5 +309,15 @@ def main():
                 # 알 수 없는 명령은 무시
                 pass
 
+    # 종료 시 GPIO 정리
+    GPIO.cleanup()
+    print("[GPIO] Cleanup done")
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n[MAIN] Interrupted by user")
+        GPIO.cleanup()
+        print("[GPIO] Cleanup done")
+

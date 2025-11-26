@@ -291,6 +291,7 @@ class App:
         self.mv_pan=DoubleVar(value=0.0); self.mv_tilt=DoubleVar(value=0.0)
         self.mv_speed=IntVar(value=100);  self.mv_acc=DoubleVar(value=1.0)
         self.led=IntVar(value=0)
+        self.laser_state=BooleanVar(value=False)  # 레이저 상태 추적
         self._slider(tab_manual,0,"Pan",-180,180,self.mv_pan,0.5)
         self._slider(tab_manual,1,"Tilt",-30,90,self.mv_tilt,0.5)
         self._slider(tab_manual,2,"Speed",0,100,self.mv_speed,1)
@@ -299,6 +300,9 @@ class App:
         Button(tab_manual, text="Apply Move", command=self.apply_move).grid(row=4,column=1,sticky="e",pady=4)
         self._slider(tab_manual,5,"LED",0,255,self.led,1)
         Button(tab_manual, text="Set LED", command=self.set_led).grid(row=6,column=1,sticky="e",pady=4)
+        # 레이저 토글 버튼
+        self.laser_btn = Button(tab_manual, text="Laser OFF", command=self.toggle_laser, bg="#555", fg="white")
+        self.laser_btn.grid(row=7,column=0,columnspan=2,sticky="ew",pady=4,padx=4)
 
         # preview settings
         misc_sf = ScrollFrame(tab_misc)
@@ -762,6 +766,20 @@ class App:
     def apply_move(self): self.ctrl.send({"cmd":"move","pan":float(self.mv_pan.get()),"tilt":float(self.mv_tilt.get()),
                                           "speed":self.mv_speed.get(),"acc":float(self.mv_acc.get())})
     def set_led(self): self.ctrl.send({"cmd":"led","value":int(self.led.get())})
+    
+    def toggle_laser(self):
+        """레이저 on/off 토글"""
+        current_state = self.laser_state.get()
+        new_state = not current_state
+        self.laser_state.set(new_state)
+        
+        # 버튼 텍스트와 색상 업데이트
+        if new_state:
+            self.laser_btn.config(text="Laser ON", bg="#00AA00", fg="white")
+            self.ctrl.send({"cmd":"laser", "value": 1})  # HIGH
+        else:
+            self.laser_btn.config(text="Laser OFF", bg="#555", fg="white")
+            self.ctrl.send({"cmd":"laser", "value": 0})  # LOW
 
     def toggle_preview(self):
         if self.preview_enable.get():
