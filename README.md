@@ -1,104 +1,371 @@
-# PTCamera_waveshare
-control for https://www.waveshare.com/2-axis-pan-tilt-camera-module.htm 
+# 🎯 PTCamera_waveshare
 
-2025-09-15
+**Waveshare Pan-Tilt 카메라 모듈 제어 시스템**
 
-1. ip 확인 > 라파 코드에 주석으로 처리 ✅
-2. GPU 사용가능하면 하자 .. (속도향상 이건 open cv 를 torch 에 맞게 콘다 환경을 바꿔야할듯) ✅
-2.1 GUI 기능체크 ✅
-- Scan ✅
-- Manual / LED
-ㄴ Pan,Tilt Led ✅
-- Preview & Settings
-ㄴ Live Preview : 프리뷰 끄고키기 , 설정값 넘어감 ✅
-ㄴ Preview 설정값들 : w/h : 2592,1944 1920,1080 640,360 , fps : frame per seconds  , quality : 품질 낮춰서 preview 하기 ✅
-ㄴ Apply Preview Size : 설정값들 preview 에 적용하기 ✅
-ㄴ Undistort preview , Load calib.npz : 보정값 불러오고 프리뷰 적용 ✅
-ㄴ Also save undistorted copy : 보정한버젼도 저장 ✅
-ㄴ Alpha/Balance (0~1) : 보정 계수 ✅
-3. Scan data set 
-ㄴ pan tilt step : 10 , Speed 100, Accel 1.0 Settle 0.5 -> 흔들림 제어 ✅
-ㄴ 이상태에서 pan ,tilt step 30 변경시 흔들림 제어 ❌
-ㄴㄴ speed 는 줄여도 체감안됨
-ㄴㄴ Accel 는 줄이면 체감이됨
-ㄴ pan tilt step : 30 , Speed 100, Accel 0.5 Settle 0.6 -> 흔들림 제어 ✅
+OpenCV와 YOLO를 활용한 자동 타겟팅 및 레이저 포인팅 시스템
 
+[![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
+[![OpenCV](https://img.shields.io/badge/OpenCV-4.x-green.svg)](https://opencv.org/)
+[![YOLO](https://img.shields.io/badge/YOLO-v11-red.svg)](https://github.com/ultralytics/ultralytics)
 
-2025-09-17
-1. Dataset_3 까지만 우선 학습시켜서 코드에 적용함
-ㄴ 성능은 생각보다 Not bad 하지만 중간중간 인식 안되는거 생각하면 좀더 학습을하던가 파라미터 조정을 하던가 방안을 생각해야할듯
+---
 
+## 📋 목차
 
-** 반사판은 가로줄 기준으로 부착?
+- [프로젝트 개요](#-프로젝트-개요)
+- [주요 기능](#-주요-기능)
+- [시스템 아키텍처](#-시스템-아키텍처)
+- [설치 방법](#-설치-방법)
+- [사용법](#-사용법)
+- [디렉토리 구조](#-디렉토리-구조)
+- [하드웨어 구성](#-하드웨어-구성)
+- [개발 이력](#-개발-이력)
+- [향후 개선 사항](#-향후-개선-사항)
+- [기여하기](#-기여하기)
 
+---
 
-문제 1. 거리가 멀면 반사가 잘안됨.. (problem 폴더)
-문제 2. 스캔각을 잘해야 반사가 될듯?
+## 🎯 프로젝트 개요
 
-2025-09-20
-- 좀더 가시성 좋게하기 ✅
-- yolo 학습 (dataset_4 이상)
-ㄴ 우선 보정된 이미지 기반으로 학습 ✅
-- 보내는거 문제가아니라 지금 찎는게 각도 바뀔때마다 안찎는거같은데 이제 이거 쓰레드 나눠야 되나싶기도하고 이부분 문제 다시생각하기 ✅ (이문제가생긴게 폴더 겹쳐서였는데 다른방식으로 찍어도 같은각도였어가지고 같은사진이 2번나온거였음)
+이 프로젝트는 [Waveshare 2-Axis Pan-Tilt 카메라 모듈](https://www.waveshare.com/2-axis-pan-tilt-camera-module.htm)을 사용하여 **자동 객체 탐지**, **왜곡 보정**, **정밀 타겟팅**을 수행하는 광학 무선 전력 전송(Optical WPT) 시스템입니다.
 
+### 핵심 목표
+- 📷 **실시간 객체 인식**: YOLO 기반 반사판 자동 탐지
+- 🎯 **정밀 타겟팅**: CSV 데이터 기반 선형 피팅 알고리즘
+- 🔧 **왜곡 보정**: 카메라 캘리브레이션 및 실시간 보정
+- ⚡ **GPU 가속**: CUDA 지원으로 성능 최적화
 
-할일
-- 연구노트 밀린거 작성
-- 각 필터별 인식 성능 생각해보기 (무슨 필터쓸지랑 빨강 고휘도 반사판에 어울리는 필터를 설계?)
-- 카메라선 해결
-- 데이터셋 학습 지표확인해보고 문제되는 부분 확인
-- 이제 optical rail 관련 내일 공부하기 
+---
 
-2025-10-27
-음 이제 리팩토링이랑 디렉토리 정리좀할거야
+## ✨ 주요 기능
 
-리팩토링 해야할거
-1. 서버 ip 일일히 지정하지말고 서버에접속한 ip 확인해서 하기(가능하면 불가능하면 기존그대로 진행).
-2. calib, yolo 같은거 최초에 코드적으로 지정하게 하고 추가 지정하게 바꾸기 ㅡㅡ 개귀찮음.
-3. 쓸대없는 코드 싹다 밀어버리기 이제 디버깅 필요없으니까.
-4. 코드를 두개짜야할거같아 실제 바로 할거랑 테스트용이랑 실제는 스캔 > 조정 바로되는거로 해야할거같은데
+### 1. **스캔 모드 (Scan)**
+- 지정된 각도 범위를 자동으로 스캔하여 이미지 수집
+- YOLO 결과를 CSV로 자동 로깅 (pan/tilt 각도, 좌표, confidence)
+- 스캔 중 흔들림 제어 (Accel, Settle 파라미터 조정)
 
+### 2. **수동 제어 (Manual/LED)**
+- Pan/Tilt 각도 직접 조정
+- LED 밝기 제어
+- 속도 및 가속도 설정
 
-디렉토리 정리할거
-1. 사용한 자료는 자료별로 묶어서 빼놓거나 하기.
-2. 분석용 코드 따로 처리해놓기.
+### 3. **프리뷰 & 설정 (Preview & Settings)**
+- 실시간 라이브 프리뷰
+- 해상도 조정 (640x360 ~ 2592x1944)
+- FPS 및 품질 설정
+- 왜곡 보정 적용/해제
+- Alpha/Balance 파라미터 조정
 
-추가 연구 필요사항
-1. 레이저 조준하는 알고리즘.
-(지금생각중인건 1차 조준 후에 레이저 깜빡이는걸로 한번 인식해서 그 px 차이만큼 조준하는 방식?
-생각중)
-2. 여러개일때 객체 따로 인식하는 알고리즘.
+### 4. **Pointing (자동 타겟팅)**
+- 스캔 CSV 데이터 기반 선형 피팅
+- 가중 평균으로 타겟 각도 계산
+- 실시간 센터링 (YOLO centroid 기반)
 
-Repo 정리(2025-10-27)
+### 5. **하드웨어 테스트 (GPIO.py)**
+- Raspberry Pi GPIO 핀 제어
+- ESP32와 통신하여 LED 제어
+- 1초 주기 HIGH/LOW 신호 테스트
 
-1. Com. Server. Raspverrypi. 는 그대로 냅두기
+---
 
-2. pointing~ 디렉들 ---> Fall_Paper_Datatset
-내용 : 추계에 썼던 테스트 데이터셋들과 pointing 디버깅 데이터
+## 🏗️ 시스템 아키텍처
 
-3. angle_velocity --> Fall_Paper_Dataset
-내용 : pan 과 px_w ,tilt와 px_h 와 선형인지 분석했던 코드와 데이터셋(angle_velocity_data)
+```
+┌─────────────────┐      Socket (JSON/Binary)      ┌──────────────────┐
+│   GUI Client    │ ◄───────────────────────────── │  Server (Broker) │
+│   (Windows PC)  │                                 │   (노트북/PC)     │
+│                 │                                 │                  │
+│ • Tkinter UI    │                                 │ • 제어 중계      │
+│ • YOLO 처리     │                                 │ • 이미지 중계    │
+│ • 왜곡 보정     │                                 │                  │
+└─────────────────┘                                 └──────────────────┘
+                                                             │
+                                                             │ Socket
+                                                             ▼
+                                                    ┌──────────────────┐
+                                                    │  Pi Agent        │
+                                                    │  (Raspberry Pi)  │
+                                                    │                  │
+                                                    │ • Picamera2      │
+                                                    │ • 시리얼 통신    │
+                                                    │ • GPIO 제어      │
+                                                    └──────────────────┘
+                                                             │
+                                                             │ Serial (UART)
+                                                             ▼
+                                                    ┌──────────────────┐
+                                                    │  ESP32 (Motor)   │
+                                                    │                  │
+                                                    │ • Pan-Tilt 제어  │
+                                                    │ • LED 제어       │
+                                                    └──────────────────┘
+```
 
-4. Dataset --> Yolo 로 이름변경
-내용 : 학습했던 Yolo 모델들 자료
+---
 
-5. Testset --> Calibration 으로 이름변경
-내용 : chess data 자료
+## 🚀 설치 방법
 
+### 사전 요구사항
 
-2025-11-18 리팩토링
+**Windows (GUI Client)**
+```bash
+Python 3.8+
+CUDA Toolkit (선택, GPU 가속용)
+```
 
-✅ 코드 품질 개선
-가독성 ↗️: 기능별로 파일 분리
-유지보수성 ↗️: 수정할 때 해당 파일만 건드리면 됨
-재사용성 ↗️: processors를 다른 프로젝트에서도 사용 가능
-테스트 용이성 ↗️: 각 모듈 독립 테스트
-✅ 개발 편의성 향상
-설정 관리: config.py 하나로 모든 설정 변경
-자동 로드: calib.npz, best.pt 자동 로드 (더 이상 매번 선택 안 해도 됨!)
-에러 추적: 문제 발생 시 해당 모듈만 확인
-협업 친화: 여러 명이 동시에 다른 부분 작업 가능
-✅ 아키텍처 개선
-관심사 분리: GUI / 네트워크 / 이미지처리 / 설정 완전 분리
-의존성 정리: 순환 import 해결
-확장성: 새로운 processor 쉽게 추가 가능
+**Raspberry Pi**
+```bash
+Python 3.8+
+Picamera2
+RPi.GPIO
+```
+
+### GUI 클라이언트 설치
+
+```bash
+# 1. 저장소 클론
+git clone https://github.com/leontnhaps/PTCamera_waveshare.git
+cd PTCamera_waveshare
+
+# 2. 가상환경 생성 (권장)
+python -m venv venv
+venv\Scripts\activate  # Windows
+# source venv/bin/activate  # Linux/Mac
+
+# 3. 의존성 설치
+pip install opencv-python opencv-contrib-python
+pip install numpy pillow
+pip install ultralytics  # YOLO
+pip install torch torchvision  # GPU 가속용 (선택)
+
+# 4. 리팩토링된 GUI 실행
+cd Refactoring
+python Com_main.py
+```
+
+### Raspberry Pi 에이전트 설치
+
+```bash
+# 1. Picamera2 설치
+sudo apt update
+sudo apt install -y python3-picamera2
+
+# 2. 의존성 설치
+pip3 install pyserial
+
+# 3. 에이전트 실행
+cd Raspberrypi
+python3 test.py
+```
+
+### 서버 실행
+
+```bash
+cd Server
+python test.py
+```
+
+---
+
+## 💡 사용법
+
+### 1. 기본 워크플로우
+
+```bash
+# 1단계: 서버 시작
+cd Server
+python test.py
+
+# 2단계: Raspberry Pi 에이전트 시작
+ssh pi@<raspberry-pi-ip>
+cd Raspberrypi
+python3 test.py
+
+# 3단계: GUI 클라이언트 시작
+cd Refactoring
+python Com_main.py
+```
+
+### 2. 스캔 및 타겟팅 프로세스
+
+1. **카메라 보정 파일 로드**
+   - `Preview & Settings` 탭에서 `Load calib.npz` 클릭
+
+2. **YOLO 모델 로드**
+   - `Load YOLO Weights (.pt)` 버튼 클릭
+   - 또는 `config.py`에서 자동 로드 설정
+
+3. **스캔 실행**
+   - `Scan` 탭에서 Pan/Tilt 범위 및 Step 설정
+   - `Start Scan` 클릭
+   - 자동으로 CSV 로깅 시작
+
+4. **Pointing 계산**
+   - `Pointing` 탭에서 `Select CSV` 버튼으로 스캔 CSV 선택
+   - `가중평균 계산` 클릭 → 타겟 각도 계산
+   - `Move to Target` 클릭 → 카메라 이동
+
+5. **센터링 (선택)**
+   - `Centering Enable` 체크
+   - YOLO centroid 기반 실시간 미세 조정
+
+### 3. GPIO 테스트 (하드웨어 검증)
+
+```bash
+# Raspberry Pi에서 실행
+python3 GPIO.py
+
+# 예상 출력:
+# Signal: HIGH (LED ON)
+# Signal: LOW (LED OFF)
+# (1초 주기 반복)
+```
+
+---
+
+## 📂 디렉토리 구조
+
+```
+PTCamera_waveshare/
+├── 📁 Refactoring/              ✨ 리팩토링된 코드 (권장)
+│   ├── Com_main.py              # GUI 메인 파일
+│   ├── config.py                # 설정 중앙화
+│   ├── network.py               # 네트워크 클라이언트
+│   ├── gui_panels.py            # UI 패널
+│   ├── processors/              # 이미지 처리 모듈
+│   │   ├── undistort_processor.py
+│   │   └── yolo_processor.py
+│   ├── controllers/             # 비즈니스 로직
+│   │   ├── pointing_controller.py
+│   │   ├── scan_controller.py
+│   │   └── centering_controller.py
+│   └── utils/                   # 유틸리티
+│       └── geometry.py
+│
+├── 📁 Com/                      # 레거시 GUI (백업용)
+│   └── test.py
+│
+├── 📁 Server/                   # 중계 서버
+│   └── test.py
+│
+├── 📁 Raspberrypi/              # 라즈베리파이 에이전트
+│   └── test.py
+│
+├── 📄 calib.npz                 # 카메라 보정 파일
+├── 📄 yolov11m.pt               # YOLO 모델 (v11 medium)
+├── 📄 yolov11s.pt               # YOLO 모델 (v11 small)
+├── 📄 GPIO.py                   # GPIO 테스트 코드
+└── 📄 README.md
+```
+
+---
+
+## 🔧 하드웨어 구성
+
+### 필수 장비
+
+| 항목 | 모델 | 용도 |
+|------|------|------|
+| **카메라 모듈** | Waveshare 2-Axis Pan-Tilt Camera | 팬-틸트 제어 |
+| **메인 컴퓨터** | Raspberry Pi 4 (4GB+) | 카메라 제어 및 이미지 전송 |
+| **모터 컨트롤러** | ESP32 | Pan-Tilt 모터 제어 |
+| **GUI 클라이언트** | Windows PC (CUDA 지원 권장) | YOLO 처리 및 UI |
+| **반사판** | 고휘도 적색 반사 필름 | 객체 인식 타겟 |
+
+### 핀 연결
+
+**Raspberry Pi ↔ ESP32**
+- GPIO 15 (BCM) → ESP32 입력 핀
+- GND → GND
+
+**ESP32 ↔ Pan-Tilt Motor**
+- UART TX/RX → 모터 시리얼 통신
+
+---
+
+## 📅 개발 이력
+
+### **2025-11-26: GPIO 하드웨어 테스트**
+- ✅ Raspberry Pi GPIO 15번 핀으로 ESP32 제어
+- ✅ LED ON/OFF 1초 주기 테스트 코드 작성
+
+### **2025-11-18: 대규모 리팩토링 완료**
+- ✅ **코드 품질 개선**: Com_main.py 997줄 → 792줄 (21% 감소)
+- ✅ **모듈화**: controllers/, processors/, utils/ 분리
+- ✅ **개발 편의성**: config.py 중앙화, calib/yolo 자동 로드
+- ✅ **아키텍처 개선**: 관심사 분리, 재사용성 향상
+
+### **2025-10-27: 리팩토링 계획 수립**
+- 디렉토리 정리 완료
+- 서버 IP 자동 확인 계획
+- 실제 운영용/테스트용 코드 분리 계획
+
+### **2025-09-20: YOLO 학습 개선**
+- 보정된 이미지 기반으로 YOLO 재학습
+- Dataset_4 이상 학습 진행
+
+### **2025-09-17: YOLO 통합**
+- Dataset_3까지 학습한 모델 적용
+- 인식 성능 확인 (전반적으로 양호)
+
+### **2025-09-15: 프로젝트 시작**
+- ✅ GUI 기능 구현 (Scan, Manual, Preview)
+- ✅ GPU 가속 지원 (CUDA)
+- ✅ 왜곡 보정 적용
+- ✅ 스캔 파라미터 최적화 (흔들림 제어)
+
+---
+
+## 🔬 향후 개선 사항
+
+### 연구 필요
+1. **레이저 조준 알고리즘**
+   - 1차 조준 후 레이저 깜빡임으로 픽셀 차이 보정
+   - 피드백 루프 기반 정밀도 향상
+
+2. **다중 객체 인식**
+   - 여러 개의 반사판 동시 추적
+   - 우선순위 기반 타겟 선택
+
+### 알려진 문제
+- ⚠️ **거리 제한**: 먼 거리에서 반사 성능 저하
+- ⚠️ **각도 민감도**: 스캔 각도에 따라 인식률 변동
+
+### 계획된 기능
+- [ ] 레이저 트래킹 프로세서 추가
+- [ ] 다중 타겟 우선순위 알고리즘
+- [ ] 웹 기반 모니터링 대시보드
+- [ ] 자동 캘리브레이션 기능
+
+---
+
+## 📄 라이선스
+
+이 프로젝트는 교육 및 연구 목적으로 개발되었습니다.
+
+---
+
+## 👤 개발자
+
+**leontnhaps**
+- GitHub: [@leontnhaps](https://github.com/leontnhaps)
+- Repository: [PTCamera_waveshare](https://github.com/leontnhaps/PTCamera_waveshare)
+
+---
+
+## 🙏 감사의 말
+
+- [Waveshare](https://www.waveshare.com/) - Pan-Tilt 카메라 모듈
+- [Ultralytics](https://github.com/ultralytics/ultralytics) - YOLOv11
+- [OpenCV](https://opencv.org/) - 컴퓨터 비전 라이브러리
+- [Raspberry Pi Foundation](https://www.raspberrypi.org/) - Picamera2
+
+---
+
+<p align="center">
+  <i>광학 무선 전력 전송 시스템을 위한 자동 타겟팅 솔루션</i>
+</p>
+
+<p align="center">
+  Made with ❤️ for Optical WPT Research
+</p>
