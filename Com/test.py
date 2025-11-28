@@ -200,8 +200,8 @@ class App:
         self.pan_min=IntVar(value=-180); self.pan_max=IntVar(value=180); self.pan_step=IntVar(value=15)
         self.tilt_min=IntVar(value=-30); self.tilt_max=IntVar(value=90);  self.tilt_step=IntVar(value=15)
         self.width=IntVar(value=2592);   self.height=IntVar(value=1944); self.quality=IntVar(value=90)
-        self.speed=IntVar(value=100);    self.acc=DoubleVar(value=1.0);  self.settle=DoubleVar(value=0.25)
-        self.led_settle=DoubleVar(value=0.15)
+        self.speed=IntVar(value=100);    self.acc=DoubleVar(value=1.0);  self.settle=DoubleVar(value=0.6)
+        self.led_settle=DoubleVar(value=0.3)
         self.hard_stop = BooleanVar(value=False)
 
         self._row(tab_scan, 0, "Pan min/max/step", self.pan_min, self.pan_max, self.pan_step)
