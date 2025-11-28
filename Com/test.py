@@ -23,15 +23,6 @@ except Exception:
     _TORCH_AVAILABLE = False
 # =============================================================
 
-# ==== [NEW] Optional Ultralytics YOLO (GPU inference if available) ====
-try:
-    from ultralytics import YOLO
-    _YOLO_OK = True
-except Exception:
-    YOLO = None
-    _YOLO_OK = False
-# =====================================================================
-
 SERVER_HOST = "127.0.0.1"
 GUI_CTRL_PORT = 7600
 GUI_IMG_PORT  = 7601
@@ -177,25 +168,8 @@ class App:
         self._ud_torch_grid_wh = None   # (w,h)
         # ===================================
 
-        # ==== YOLO overlay state ====
-        self.yolo_enable = BooleanVar(value=False)
-        self.yolo_conf   = DoubleVar(value=0.25)
-        self.yolo_iou    = DoubleVar(value=0.55)
-        self.yolo_imgsz  = IntVar(value=832)     # 32배수 권장 (640/704/768/832/896/960 ...)
-        self.yolo_stride = IntVar(value=2)       # N프레임마다만 추론
-        self.yolo_wpath  = StringVar(value="")   # best.pt 경로
 
-        # [NEW] 가시성 옵션
-        self.yolo_box_thick = IntVar(value=4)      # ← 박스 테두리 두께
-        self.yolo_text_scale = DoubleVar(value=0.7) # ← 텍스트 스케일
-        self.yolo_text_thick = IntVar(value=2)      # ← 텍스트 두께
-
-        self._yolo_model   = None
-        self._yolo_last    = None   # (boxes, confs, clses) 캐시
-        self._yolo_idx     = 0
-        self._yolo_device  = (0 if (torch is not None and torch.cuda.is_available()) else "cpu")
-
-        print(f"[INFO] cv2.cuda={self._use_cv2_cuda}, torch_cuda={self._torch_cuda}, yolo_device={self._yolo_device}")
+        print(f"[INFO] cv2.cuda={self._use_cv2_cuda}, torch_cuda={self._torch_cuda}")
 
         # top bar
         top = Frame(root); top.pack(fill="x", padx=10, pady=6)
@@ -332,45 +306,7 @@ class App:
             variable=self.ud_alpha, command=lambda v: setattr(self, "_ud_src_size", None))\
             .grid(row=row, column=1, sticky="w"); row+=1
 
-        # ==== YOLO UI ====  ← 'tab_misc'가 아니라 'misc'를 parent로!
-        ttk.Separator(misc, orient="horizontal").grid(row=row, column=0, columnspan=4, sticky="ew", pady=(8,6)); row+=1
-
-        Checkbutton(
-            misc, text="YOLO overlay (preview에 결과 그리기)",
-            variable=self.yolo_enable, command=self._on_toggle_yolo
-        ).grid(row=row, column=0, sticky="w"); row+=1
-
-        Button(misc, text="Load YOLO weights (.pt)", command=self.load_yolo_weights)\
-            .grid(row=row, column=0, sticky="w", pady=2)
-
-        self.lbl_yolo_w = Label(misc, textvariable=self.yolo_wpath, anchor="w")
-        self.lbl_yolo_w.grid(row=row, column=1, columnspan=3, sticky="we"); row+=1
-
-        Label(misc, text="conf").grid(row=row, column=0, sticky="w")
-        ttk.Entry(misc, width=8, textvariable=self.yolo_conf).grid(row=row, column=1, sticky="w", padx=4)
-        Label(misc, text="iou").grid(row=row, column=2, sticky="w")
-        ttk.Entry(misc, width=8, textvariable=self.yolo_iou).grid(row=row, column=3, sticky="w", padx=4); row+=1
-
-        Label(misc, text="imgsz").grid(row=row, column=0, sticky="w")
-        ttk.Entry(misc, width=8, textvariable=self.yolo_imgsz).grid(row=row, column=1, sticky="w", padx=4)
-        Label(misc, text="stride(N프레임)").grid(row=row, column=2, sticky="w")
-        ttk.Entry(misc, width=8, textvariable=self.yolo_stride).grid(row=row, column=3, sticky="w", padx=4); row+=1
-        # YOLO UI 아래쪽 어딘가에 추가
-        self.yolo_show_centroid = BooleanVar(value=True)
-        self.yolo_show_center_cross = BooleanVar(value=True)
-
-        Checkbutton(misc, text="Show centroid dot (avg of detections)", 
-                    variable=self.yolo_show_centroid).grid(row=row, column=0, sticky="w"); row+=1
-        Checkbutton(misc, text="Show image center crosshair", 
-                    variable=self.yolo_show_center_cross).grid(row=row, column=0, sticky="w"); row+=1
-
-        # [NEW] 가시성 옵션 UI
-        Label(misc, text="box thickness").grid(row=row, column=0, sticky="w")
-        ttk.Entry(misc, width=8, textvariable=self.yolo_box_thick).grid(row=row, column=1, sticky="w", padx=4)
-        Label(misc, text="text scale").grid(row=row, column=2, sticky="w")
-        ttk.Entry(misc, width=8, textvariable=self.yolo_text_scale).grid(row=row, column=3, sticky="w", padx=4); row+=1
-        Label(misc, text="text thickness").grid(row=row, column=0, sticky="w")
-        ttk.Entry(misc, width=8, textvariable=self.yolo_text_thick).grid(row=row, column=1, sticky="w", padx=4); row+=1
+        # ==== YOLO UI 제거됨 ====
 
         # (있으면) 이 줄도 추가해두면 너비 늘어날 때 경로 라벨이 자연스럽게 늘어남
         for c in range(4):
@@ -940,51 +876,8 @@ class App:
                                 cv2.imwrite(str(out), ubgr)
                         except Exception as e:
                             print("[save_ud] err:", e)
-                    # === [핵심] 스캔 중 CSV에 YOLO 결과 기록 ===
-                    if self._scan_csv_writer is not None:
-                            try:
-                                # 파일명에서 pan/tilt 추출
-                                m = self._fname_re.search(name)
-                                pan_deg = float(m.group("pan")) if m else None
-                                tilt_deg = float(m.group("tilt")) if m else None
+                    # === CSV/YOLO 기록 제거됨 ===
 
-                                # 원본 디코드
-                                arr = np.frombuffer(data, np.uint8)
-                                bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                                if bgr is None:
-                                    raise RuntimeError("cv2.imdecode 실패")
-
-                                # ★★★ 스캔 CSV/YOLO는 '항상 보정' ★★★
-                                if self._ud_K is None or self._ud_D is None:
-                                    # 안전장치: 혹시 start_scan 체크를 우회했을 때 대비
-                                    ui_q.put(("toast", "❌ 보정 파라미터 없음 → 스캔 감지/기록 중단"))
-                                    return
-                                bgr = self._undistort_bgr(bgr)   # ← 여기서 반드시 언디스토트
-                                H, W = bgr.shape[:2]             # ← 보정 이후의 W,H로 교체
-
-                                # YOLO 보장 & 추론
-                                if self._ensure_yolo_model_for_scan():
-                                    res = self._yolo_model.predict(
-                                        bgr,
-                                        imgsz=self._scan_yolo_imgsz,
-                                        conf=self._scan_yolo_conf,
-                                        iou=float(self.yolo_iou.get()),
-                                        device=self._yolo_device,
-                                        verbose=False
-                                    )[0]
-
-                                    if res is not None and res.boxes is not None and len(res.boxes) > 0:
-                                        for b in res.boxes:
-                                            conf = float(b.conf.cpu().item() or 0.0)
-                                            if conf < self._scan_yolo_conf: 
-                                                continue
-                                            cls = int(b.cls.cpu().item() or -1)
-                                            x1,y1,x2,y2 = b.xyxy[0].cpu().numpy().tolist()
-                                            cx = 0.5*(x1+x2); cy = 0.5*(y1+y2)
-                                            # ★ CSV는 '보정 좌표계'로 기록됨
-                                            self._scan_csv_writer.writerow([name, pan_deg, tilt_deg, cx, cy, x2-x1, y2-y1, conf, cls, W, H])
-                            except Exception as e:
-                                print("[SCAN][CSV] write err:", e)
                     if self._resume_preview_after_snap:
                         self._resume_preview_after_snap = False
                         self.resume_preview()
@@ -1022,9 +915,9 @@ class App:
             if self.ud_enable.get() and self._ud_K is not None:
                 bgr = self._undistort_bgr(bgr)
 
-            # 1) YOLO 먼저 실행 → 필름 중심 추출/저장
-            bgr = self._run_yolo_and_draw(bgr)
-            film_center = self._film_last_center  # (cx_f, cy_f) or None
+
+            # YOLO 제거됨 - 레이저 검출만 수행
+
 
             # 2) 레이저 검출
             found_laser, lx, ly, score = (False, 0.0, 0.0, 0.0)
@@ -1033,25 +926,8 @@ class App:
 
             H, W = bgr.shape[:2]
 
-            # 3) Film lock: 레이저를 '필름 중심'에 붙인다
-            if self.film_lock_enable.get() and film_center is not None and found_laser:
-                fx, fy = film_center
-                # 시각화(선택)
-                cv2.circle(bgr, (int(round(lx)), int(round(ly))), 6, (0,0,255), -1, lineType=cv2.LINE_AA)
-                cv2.drawMarker(bgr, (int(round(fx)), int(round(fy))),
-                            (0,255,255), cv2.MARKER_CROSS, 20, 2, cv2.LINE_AA)
 
-                # 레이저 → 필름 중심 정렬
-                self._align_laser_to_film(lx, ly, fx, fy, W, H)
-
-                # 디버그 텍스트
-                ex = fx - lx; ey = fy - ly
-                cv2.putText(bgr, f"film ({fx:.1f},{fy:.1f})  laser ({lx:.1f},{ly:.1f})  err({ex:+.1f},{ey:+.1f})",
-                            (10, max(20, H-15)), cv2.FONT_HERSHEY_SIMPLEX, 
-                            0.6, (0,0,0), 3, cv2.LINE_AA)
-                cv2.putText(bgr, f"film ({fx:.1f},{fy:.1f})  laser ({lx:.1f},{ly:.1f})  err({ex:+.1f},{ey:+.1f})",
-                            (10, max(20, H-15)), cv2.FONT_HERSHEY_SIMPLEX, 
-                            0.6, (0,255,255), 1, cv2.LINE_AA)
+            # Film lock 제거됨 (YOLO 필름 감지 필요)
 
             # (필요 시) 화면 중앙 십자 등 유지
             rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
