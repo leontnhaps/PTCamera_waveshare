@@ -125,12 +125,15 @@ def scan_worker(params, ctrl_sock: socket.socket, img_sock: socket.socket):
         q = int(params.get("quality",90))
         to_still(w,h,q)
 
+
         pans  = irange(int(params["pan_min"]),  int(params["pan_max"]),  int(params["pan_step"]))
         tilts = irange(int(params["tilt_min"]), int(params["tilt_max"]), int(params["tilt_step"]))
-        total = len(pans)*len(tilts)
+        num_positions = len(pans)*len(tilts)
+        total = num_positions * 2  # LED ON + LED OFF = 2장씩
         speed  = int(params.get("speed",100))
         acc    = float(params.get("acc",1.0))
         settle = float(params.get("settle",0.25))
+        led_settle = float(params.get("led_settle",0.15))  # LED 안정화 시간
         hard_stop = bool(params.get("hard_stop", False))
 
         def send_evt(obj):
@@ -151,17 +154,36 @@ def scan_worker(params, ctrl_sock: socket.socket, img_sock: socket.socket):
                 if hard_stop:
                     send_to_slave({"T":135}); time.sleep(0.02)
 
-                # 캡처(JPEG)
-                bio = io.BytesIO()
+
+                # === LED ON → 촬영 ===
+                send_to_slave({"T":132, "IO4": 255, "IO5": 255})  # LED ON
+                time.sleep(led_settle)  # 안정화 대기
+                
+                bio_on = io.BytesIO()
                 with cam_lock:
-                    picam.capture_file(bio, format="jpeg")
-
+                    picam.capture_file(bio_on, format="jpeg")
+                
                 ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
-                name = f"img_t{t:+03d}_p{p:+04d}_{ts}.jpg"
-                push_image(img_sock, name, bio.getvalue())
-
+                name_on = f"img_t{t:+03d}_p{p:+04d}_{ts}_led_on.jpg"
+                push_image(img_sock, name_on, bio_on.getvalue())
+                
                 done += 1
-                send_evt({"event":"progress","done":done,"total":total,"name":name})
+                send_evt({"event":"progress","done":done,"total":total,"name":name_on})
+
+                # === LED OFF → 촬영 ===
+                send_to_slave({"T":132, "IO4": 0, "IO5": 0})  # LED OFF
+                time.sleep(led_settle)  # 안정화 대기
+                
+                bio_off = io.BytesIO()
+                with cam_lock:
+                    picam.capture_file(bio_off, format="jpeg")
+                
+                ts2 = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+                name_off = f"img_t{t:+03d}_p{p:+04d}_{ts2}_led_off.jpg"
+                push_image(img_sock, name_off, bio_off.getvalue())
+                
+                done += 1
+                send_evt({"event":"progress","done":done,"total":total,"name":name_off})
 
         send_to_slave({"T":135})
         send_evt({"event":"done"})

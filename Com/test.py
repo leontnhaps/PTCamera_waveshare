@@ -227,6 +227,7 @@ class App:
         self.tilt_min=IntVar(value=-30); self.tilt_max=IntVar(value=90);  self.tilt_step=IntVar(value=15)
         self.width=IntVar(value=2592);   self.height=IntVar(value=1944); self.quality=IntVar(value=90)
         self.speed=IntVar(value=100);    self.acc=DoubleVar(value=1.0);  self.settle=DoubleVar(value=0.25)
+        self.led_settle=DoubleVar(value=0.15)
         self.hard_stop = BooleanVar(value=False)
 
         self._row(tab_scan, 0, "Pan min/max/step", self.pan_min, self.pan_max, self.pan_step)
@@ -236,10 +237,11 @@ class App:
         self._entry(tab_scan, 4, "Speed", self.speed)
         self._entry(tab_scan, 5, "Accel", self.acc)
         self._entry(tab_scan, 6, "Settle(s)", self.settle)
+        self._entry(tab_scan, 7, "LED Settle(s)", self.led_settle)
         Checkbutton(tab_scan, text="Hard stop(정지 펄스)", variable=self.hard_stop)\
-            .grid(row=7, column=1, sticky="w", padx=4, pady=2)
+            .grid(row=8, column=1, sticky="w", padx=4, pady=2)
 
-        ops = Frame(tab_scan); ops.grid(row=8, column=0, columnspan=4, sticky="w", pady=6)
+        ops = Frame(tab_scan); ops.grid(row=9, column=0, columnspan=4, sticky="w", pady=6)
         Button(ops, text="Start Scan", command=self.start_scan).pack(side="left", padx=4)
         Button(ops, text="Stop Scan",  command=self.stop_scan).pack(side="left", padx=4)
         self.prog = ttk.Progressbar(ops, orient=HORIZONTAL, length=280, mode="determinate"); self.prog.pack(side="left", padx=10)
@@ -809,6 +811,7 @@ class App:
             "pan_min":self.pan_min.get(),"pan_max":self.pan_max.get(),"pan_step":self.pan_step.get(),
             "tilt_min":self.tilt_min.get(),"tilt_max":self.tilt_max.get(),"tilt_step":self.tilt_step.get(),
             "speed":self.speed.get(),"acc":float(self.acc.get()),"settle":float(self.settle.get()),
+            "led_settle":float(self.led_settle.get()),
             "width":self.width.get(),"height":self.height.get(),"quality":self.quality.get(),
             "session":datetime.now().strftime("scan_%Y%m%d_%H%M%S"),
             "hard_stop":self.hard_stop.get()
