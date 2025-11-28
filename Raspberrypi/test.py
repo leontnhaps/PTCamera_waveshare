@@ -148,7 +148,7 @@ def scan_worker(params, ctrl_sock: socket.socket, img_sock: socket.socket):
         first_pan = pans[0]
         first_tilt = tilts[0]
         send_to_slave({"T":133, "X": float(first_pan), "Y": float(first_tilt), "SPD": speed, "ACC": acc})
-        time.sleep(settle)  # 도착 대기
+        time.sleep(5.0)  # 도착 대기
         if hard_stop:
             send_to_slave({"T":135}); time.sleep(0.02)
         # ===============================================
