@@ -323,9 +323,6 @@ class App:
         # 파일명에서 pan/tilt 파싱 (예: img_t+00_p+001_....jpg)
         self._fname_re = re.compile(r"img_t(?P<tilt>[+\-]\d{2,3})_p(?P<pan>[+\-]\d{2,3})_.*\.(jpg|jpeg|png)$", re.IGNORECASE)
 
-        # 스캔 중 YOLO 강제 적용(overlay와 무관)
-        self._scan_yolo_conf = 0.50   # 스캔용 conf (원하면 UI 변수와 같게 써도 OK)
-        self._scan_yolo_imgsz = 832   # 스캔용 imgsz
 
         # === Pointing 좌표 로깅 상태 ===
         self._pointing_log_fp = None
@@ -369,90 +366,9 @@ class App:
         for c in range(4):
             tab_point.grid_columnconfigure(c, weight=1)
 
-        # ==== Laser tracking (red only) ====
-        self.laser_track_enable = BooleanVar(value=True)
-        self.laser_target_dy    = IntVar(value=0)    # 목표 y 오프셋(px)
 
-        # HSV 임계 (빨강은 Hue 양끝, S/V 높게)
-        self.laser_h_lo1 = IntVar(value=0)     # [0,10]
-        self.laser_h_hi1 = IntVar(value=10)
-        self.laser_h_lo2 = IntVar(value=170)   # [170,180]
-        self.laser_h_hi2 = IntVar(value=180)
-        self.laser_s_min = IntVar(value=120)   # 채도 최소
-        self.laser_v_min = IntVar(value=180)   # 명도 최소
+        # Laser tracking 제거됨
 
-        self.laser_min_area = IntVar(value=3)      # 픽셀
-        self.laser_max_area = IntVar(value=5000)   # 픽셀
-        self.laser_open_ksz = IntVar(value=1)      # 모폴로지 open 커널 반경(px)
-
-        ttk.Separator(misc, orient="horizontal").grid(row=row, column=0, columnspan=4, sticky="ew", pady=(10,6)); row+=1
-        Checkbutton(misc, text="Laser tracking (RED HSV)", variable=self.laser_track_enable)\
-            .grid(row=row, column=0, sticky="w"); row+=1
-        Label(misc, text="target Δy(px)").grid(row=row, column=0, sticky="w")
-        ttk.Entry(misc, width=8, textvariable=self.laser_target_dy).grid(row=row, column=1, sticky="w", padx=4); row+=1
-
-        Label(misc, text="H1[lo,hi]").grid(row=row, column=0, sticky="w")
-        ttk.Entry(misc, width=6, textvariable=self.laser_h_lo1).grid(row=row, column=1, sticky="w")
-        ttk.Entry(misc, width=6, textvariable=self.laser_h_hi1).grid(row=row, column=2, sticky="w"); row+=1
-
-        Label(misc, text="H2[lo,hi]").grid(row=row, column=0, sticky="w")
-        ttk.Entry(misc, width=6, textvariable=self.laser_h_lo2).grid(row=row, column=1, sticky="w")
-        ttk.Entry(misc, width=6, textvariable=self.laser_h_hi2).grid(row=row, column=2, sticky="w"); row+=1
-
-        Label(misc, text="S≥ / V≥").grid(row=row, column=0, sticky="w")
-        ttk.Entry(misc, width=6, textvariable=self.laser_s_min).grid(row=row, column=1, sticky="w")
-        ttk.Entry(misc, width=6, textvariable=self.laser_v_min).grid(row=row, column=2, sticky="w"); row+=1
-
-        Label(misc, text="min/max area").grid(row=row, column=0, sticky="w")
-        ttk.Entry(misc, width=8, textvariable=self.laser_min_area).grid(row=row, column=1, sticky="w")
-        ttk.Entry(misc, width=8, textvariable=self.laser_max_area).grid(row=row, column=2, sticky="w"); row+=1
-
-        Label(misc, text="open ksz").grid(row=row, column=0, sticky="w")
-        ttk.Entry(misc, width=6, textvariable=self.laser_open_ksz).grid(row=row, column=1, sticky="w"); row+=1
-
-        # [YOLO 아래쪽 설정 UI 근처에 추가]
-        self.film_lock_enable = BooleanVar(value=True)     # 필름 중심에 레이저를 맞추기
-        self.film_cls_id      = IntVar(value=-1)           # 특정 클래스만 필터(-1이면 전체에서 가장 큰 박스 사용)
-        self.film_conf_min    = DoubleVar(value=0.5)       # 필름 박스 최소 신뢰도
-
-        Checkbutton(misc, text="Film lock (align laser to film center)", 
-                    variable=self.film_lock_enable).grid(row=row, column=0, sticky="w"); row+=1
-        Label(misc, text="film cls id (-1:any)").grid(row=row, column=0, sticky="w")
-        ttk.Entry(misc, width=8, textvariable=self.film_cls_id)\
-            .grid(row=row, column=1, sticky="w", padx=4)
-        Label(misc, text="film conf ≥").grid(row=row, column=2, sticky="w")
-        ttk.Entry(misc, width=8, textvariable=self.film_conf_min)\
-            .grid(row=row, column=3, sticky="w", padx=4); row+=1
-
-        # 상태
-        self._film_last_center = None   # (cx_f, cy_f) 최근 프레임 기준
-        self._laser_last = None         # (cx_l, cy_l)
-
-    def _ensure_yolo_model_for_scan(self) -> bool:
-        """스캔 중 CSV 기록용 YOLO 모델 준비(overlay 사용 여부와 무관)."""
-        # 이미 overlay에서 로드돼 있으면 재사용
-        if self._yolo_model is not None:
-            return True
-        # overlay가 꺼져 있어도 경로 지정돼 있으면 로드
-        wpath = self.yolo_wpath.get().strip()
-        if not _YOLO_OK or not wpath:
-            ui_q.put(("toast", "YOLO 가중치(.pt)을 로드하지 않아 CSV에 감지값을 기록할 수 없습니다."))
-            return False
-        try:
-            self._yolo_model = YOLO(wpath)
-            # 워밍업
-            dummy = np.zeros((self._scan_yolo_imgsz, self._scan_yolo_imgsz, 3), dtype=np.uint8)
-            self._yolo_model.predict(dummy, imgsz=self._scan_yolo_imgsz,
-                                     conf=self._scan_yolo_conf,
-                                     iou=float(self.yolo_iou.get()),
-                                     device=self._yolo_device, verbose=False)
-            return True
-        except Exception as e:
-            self._yolo_model = None
-            ui_q.put(("toast", f"[SCAN] YOLO 로드 실패: {e}"))
-            return False
-
-    
     
     # ========= Undistort helpers =========
     def load_npz(self):
@@ -568,139 +484,6 @@ class App:
 
         # CPU 경로
         return cv2.remap(bgr, self._ud_m1, self._ud_m2, cv2.INTER_LINEAR)
-
-    # ===== YOLO helpers =====
-    def load_yolo_weights(self):
-        path = filedialog.askopenfilename(filetypes=[("PyTorch Weights","*.pt")])
-        if not path:
-            return
-        self.yolo_wpath.set(path)
-        self._yolo_model = None  # 다음 사용 시 재로드
-
-    def _on_toggle_yolo(self):
-        if self.yolo_enable.get():
-            ok = self._ensure_yolo_model()
-            if not ok:
-                self.yolo_enable.set(False)
-
-    def _ensure_yolo_model(self) -> bool:
-        if not _YOLO_OK:
-            ui_q.put(("toast", "Ultralytics가 설치되어 있지 않습니다: pip install ultralytics"))
-            return False
-        wpath = self.yolo_wpath.get().strip()
-        if not wpath:
-            ui_q.put(("toast", "YOLO 가중치(.pt)를 먼저 로드하세요."))
-            return False
-        if self._yolo_model is None:
-            try:
-                self._yolo_model = YOLO(wpath)
-                # 워밍업 (초기 지연 방지)
-                dummy = np.zeros((int(self.yolo_imgsz.get()), int(self.yolo_imgsz.get()), 3), dtype=np.uint8)
-                self._yolo_model.predict(dummy, imgsz=int(self.yolo_imgsz.get()),
-                                         conf=float(self.yolo_conf.get()),
-                                         iou=float(self.yolo_iou.get()),
-                                         device=self._yolo_device, verbose=False)
-                ui_q.put(("toast", f"YOLO ready: {wpath} (device={self._yolo_device})"))
-            except Exception as e:
-                self._yolo_model = None
-                ui_q.put(("toast", f"YOLO 로드 실패: {e}"))
-                return False
-        return True
-
-    def _run_yolo_and_draw(self, bgr: np.ndarray) -> np.ndarray:
-        """N프레임마다 추론, 매 프레임 박스 + 평균점(centroid) 그리기."""
-        if not self.yolo_enable.get():
-            self._yolo_last = None
-            return bgr
-        bgr = np.ascontiguousarray(bgr, dtype=np.uint8)
-        if not self._ensure_yolo_model():
-            return bgr
-        try:
-            N = max(1, int(self.yolo_stride.get()))
-            run_infer = (self._yolo_idx % N) == 0
-
-            if run_infer:
-                res = self._yolo_model.predict(
-                    bgr,
-                    imgsz=int(self.yolo_imgsz.get()),
-                    conf=float(self.yolo_conf.get()),
-                    iou=float(self.yolo_iou.get()),
-                    device=self._yolo_device,
-                    verbose=False
-                )[0]
-                if len(res.boxes) > 0:
-                    boxes = res.boxes.xyxy.detach().cpu().numpy().astype(int)
-                    confs = res.boxes.conf.detach().cpu().numpy()
-                    clses = res.boxes.cls.detach().cpu().numpy().astype(int)
-                    self._yolo_last = (boxes, confs, clses)
-                else:
-                    self._yolo_last = (np.empty((0,4), int), np.array([]), np.array([], int))
-
-            # ---- 여기부터: 항상 안전한 기본값으로 시작 ----
-            boxes = np.empty((0,4), int)
-            confs = np.array([])
-            clses = np.array([], dtype=int)
-            if self._yolo_last is not None:
-                boxes, confs, clses = self._yolo_last
-
-            th  = max(1, int(self.yolo_box_thick.get()))
-            ts  = max(0.3, float(self.yolo_text_scale.get()))
-            tth = max(1, int(self.yolo_text_thick.get()))
-            H, W = bgr.shape[:2]
-
-            # 1) 박스 렌더
-            for (x1,y1,x2,y2), c, k in zip(boxes, confs, clses):
-                cv2.rectangle(bgr, (x1,y1), (x2,y2), (0,255,0), th, lineType=cv2.LINE_AA)
-                label = f"{c:.2f}"
-                org = (x1, max(15, y1-6))
-                cv2.putText(bgr, label, org, cv2.FONT_HERSHEY_SIMPLEX, ts, (0,0,0), tth+2, cv2.LINE_AA)
-                cv2.putText(bgr, label, org, cv2.FONT_HERSHEY_SIMPLEX, ts, (0,255,0), tth,   cv2.LINE_AA)
-
-            # 2) (옵션) 중앙 십자
-            if self.yolo_show_center_cross.get():
-                cv2.drawMarker(bgr, (W//2, H//2), (255,255,255), cv2.MARKER_CROSS, 14, 1, cv2.LINE_AA)
-
-            # 3) (옵션) 평균 중심점
-            if self.yolo_show_centroid.get() and boxes.shape[0] > 0:
-                centers = [(0.5*(x1+x2), 0.5*(y1+y2)) for (x1,y1,x2,y2) in boxes]
-                m_cx = float(np.mean([c[0] for c in centers])); m_cy = float(np.mean([c[1] for c in centers]))
-                cv2.circle(bgr, (int(round(m_cx)), int(round(m_cy))), 5, (0,200,255), -1, lineType=cv2.LINE_AA)
-                self._centering_on_centroid(m_cx, m_cy, W, H)
-                err_x = (W/2.0 - m_cx); err_y = (H/2.0 - m_cy)
-                txt = f"mean ({m_cx:.1f},{m_cy:.1f})  err ({err_x:+.1f},{err_y:+.1f}) px"
-                cv2.putText(bgr, txt, (10, max(20, H-15)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0,0,0), 3, cv2.LINE_AA)
-                cv2.putText(bgr, txt, (10, max(20, H-15)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0,255,255), 1, cv2.LINE_AA)
-
-            # === Film center 추출/저장 ===
-            film_cx = film_cy = None
-            cand = []  # ← 항상 미리 선언해두기
-            if boxes.shape[0] > 0:
-                want_cls = int(self.film_cls_id.get())
-                conf_min = float(self.film_conf_min.get())
-                for i, ((x1,y1,x2,y2), c, k) in enumerate(zip(boxes, confs, clses)):
-                    if c < conf_min: 
-                        continue
-                    if want_cls >= 0 and k != want_cls:
-                        continue
-                    area = max(1, (x2 - x1) * (y2 - y1))
-                    cx = 0.5*(x1 + x2); cy = 0.5*(y1 + y2)
-                    score = float(area) * float(c)  # 큰 물체 + 높은 conf 우선
-                    cand.append((score, area, cx, cy, i))
-
-            if len(cand) > 0:
-                cand.sort(reverse=True)
-                _, _, film_cx, film_cy, _ = cand[0]
-                cv2.drawMarker(bgr, (int(round(film_cx)), int(round(film_cy))),
-                            (255, 200, 0), cv2.MARKER_CROSS, 18, 2, cv2.LINE_AA)
-
-            self._film_last_center = (film_cx, film_cy) if film_cx is not None else None
-
-            self._yolo_idx += 1
-        except Exception as e:
-            print("[YOLO] err:", e)
-        return bgr
-
-
 
     # helpers
 
@@ -916,18 +699,9 @@ class App:
                 bgr = self._undistort_bgr(bgr)
 
 
-            # YOLO 제거됨 - 레이저 검출만 수행
 
+            # YOLO 및 Laser tracking 제거됨
 
-            # 2) 레이저 검출
-            found_laser, lx, ly, score = (False, 0.0, 0.0, 0.0)
-            if self.laser_track_enable.get():
-                found_laser, lx, ly, score = self._detect_red_laser(bgr)
-
-            H, W = bgr.shape[:2]
-
-
-            # Film lock 제거됨 (YOLO 필름 감지 필요)
 
             # (필요 시) 화면 중앙 십자 등 유지
             rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
