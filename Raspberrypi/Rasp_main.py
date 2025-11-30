@@ -20,8 +20,8 @@ print(f"[GPIO] Laser control initialized on BCM pin {LASER_PIN}")
 
 # ===================== 환경 설정 =====================
 #DEFAULT_SERVER_HOST = "192.168.0.9" # 711a
-#DEFAULT_SERVER_HOST = "172.30.1.100" # 602a
-DEFAULT_SERVER_HOST = "10.95.38.118" # hotspot
+DEFAULT_SERVER_HOST = "172.30.1.13" # 602a
+#DEFAULT_SERVER_HOST = "10.95.38.118" # hotspot
 SERVER_HOST = os.getenv("SERVER_HOST", DEFAULT_SERVER_HOST)   # 노트북/PC 서버 IP
 CTRL_PORT   = int(os.getenv("CTRL_PORT", "7500"))
 IMG_PORT    = int(os.getenv("IMG_PORT",  "7501"))
