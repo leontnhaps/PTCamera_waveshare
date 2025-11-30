@@ -323,8 +323,7 @@ class App:
         # ==== YOLO UI ====
         ttk.Separator(misc, orient="horizontal").grid(row=row, column=0, columnspan=4, sticky="ew", pady=(8,6)); row+=1
         Label(misc, text="YOLO 가중치 (.pt)").grid(row=row, column=0, sticky="w")
-        Button(misc, text="Load YOLO", command=self.load_yolo_weights)\\\r
-            .grid(row=row, column=1, sticky="w", pady=2); row+=1
+        Button(misc, text="Load YOLO", command=self.load_yolo_weights).grid(row=row, column=1, sticky="w", pady=2); row+=1
         # ==================
 
         # (있으면) 이 줄도 추가해두면 너비 늘어날 때 경로 라벨이 자연스럽게 늘어남
