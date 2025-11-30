@@ -294,10 +294,14 @@ class App:
 
         # bottom tabs
         nb = ttk.Notebook(root); nb.pack(fill="x", padx=10, pady=(6,10))
+        self.notebook = nb # [NEW] Save reference
         tab_scan   = Frame(nb); nb.add(tab_scan, text="Scan")
         tab_manual = Frame(nb); nb.add(tab_manual, text="Manual / LED")
         tab_misc = Frame(nb); nb.add(tab_misc, text="Preview & Settings")
-        tab_point  = Frame(nb); nb.add(tab_point, text="Pointing")
+        # tab_point removed (replaced by new Scrollable tab later)
+        
+        # Pointing variables moved below Scan params
+
         
         
         # scan params
@@ -307,6 +311,15 @@ class App:
         self.speed=IntVar(value=100);    self.acc=DoubleVar(value=1.0);  self.settle=DoubleVar(value=0.6)
         self.led_settle=DoubleVar(value=0.4)
         self.hard_stop = BooleanVar(value=False)
+
+        # Pointing variables (Moved here to fix AttributeError)
+        self.point_csv_path = StringVar(value="")
+        self.point_conf_min = DoubleVar(value=0.50)
+        self.point_min_samples = IntVar(value=2)
+        self.point_pan_target  = DoubleVar(value=0.0)
+        self.point_tilt_target = DoubleVar(value=0.0)
+        self.point_speed  = IntVar(value=self.speed.get())
+        self.point_acc    = DoubleVar(value=self.acc.get())
 
         self._row(tab_scan, 0, "Pan min/max/step", self.pan_min, self.pan_max, self.pan_step)
         self._row(tab_scan, 1, "Tilt min/max/step", self.tilt_min, self.tilt_max, self.tilt_step)
@@ -325,17 +338,10 @@ class App:
         self.prog = ttk.Progressbar(ops, orient=HORIZONTAL, length=280, mode="determinate"); self.prog.pack(side="left", padx=10)
         self.prog_lbl = Label(ops, text="0 / 0"); self.prog_lbl.pack(side="left")
         self.last_lbl = Label(ops, text="Last: -"); self.last_lbl.pack(side="left", padx=10)
+        self.dl_lbl   = Label(ops, text="DL 0");    self.dl_lbl.pack(side="left", padx=10)
 
-        Label(tab_point, text="Speed").grid(row=4, column=0, sticky="e")
-        ttk.Entry(tab_point, width=8, textvariable=self.point_speed).grid(row=4, column=1, sticky="w")
-        Label(tab_point, text="Accel").grid(row=4, column=2, sticky="e")
-        ttk.Entry(tab_point, width=8, textvariable=self.point_acc).grid(row=4, column=3, sticky="w")
+        # Old Pointing Tab code removed
 
-        Button(tab_point, text="Move to Target", command=self.pointing_move)\
-            .grid(row=5, column=0, columnspan=4, pady=8)
-
-        for c in range(4):
-            tab_point.grid_columnconfigure(c, weight=1)
         # manual tab
         self.mv_pan=DoubleVar(value=0.0); self.mv_tilt=DoubleVar(value=0.0)
         self.mv_speed=IntVar(value=100);  self.mv_acc=DoubleVar(value=1.0)
@@ -433,20 +439,14 @@ class App:
         self._pointing_stable_cnt = 0
         self._pointing_last_ts = 0
 
-        ttk.Separator(tab_point, orient="horizontal").grid(row=15, column=0, columnspan=4, sticky="ew", pady=(8,6))
-
+        # [MOVED] Centering variables definition
         self.centering_enable   = BooleanVar(value=False)
         self.centering_px_tol   = IntVar(value=5)      # 중앙 판정 오차(px)
         self.centering_min_frames = IntVar(value=4)    # 연속 N프레임 만족 시 종료
         self.centering_max_step = DoubleVar(value=1.0) # 한번에 움직일 최대 각도(°)
         self.centering_cooldown = IntVar(value=250)    # 명령 간 최소 간격(ms)
-
-        Checkbutton(tab_point, text="Centering mode (live refine)", variable=self.centering_enable, command=self.on_centering_toggle)\
-            .grid(row=16, column=0, sticky="w")
-        
         self.show_center_marker = BooleanVar(value=False)
-        Checkbutton(tab_point, text="Show Center Marker", variable=self.show_center_marker)\
-            .grid(row=16, column=3, sticky="w")
+
 
         # ---------------------------------------------------------------------
         # 4. Pointing Tab (Scrollable)
@@ -465,6 +465,23 @@ class App:
         )
         self.point_canvas.create_window((0, 0), window=self.point_scroll_frame, anchor="nw")
         self.point_canvas.configure(yscrollcommand=self.point_scroll.set)
+        
+        # [NEW] Mouse Wheel Binding
+        # [NEW] Mouse Wheel Binding (Improved)
+        def _on_mousewheel(event):
+            self.point_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        
+        def _bind_mousewheel(event):
+            self.point_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+            
+        def _unbind_mousewheel(event):
+            self.point_canvas.unbind_all("<MouseWheel>")
+
+        # Bind to both canvas and scroll frame to ensure it catches hover
+        self.point_canvas.bind("<Enter>", _bind_mousewheel)
+        self.point_canvas.bind("<Leave>", _unbind_mousewheel)
+        self.point_scroll_frame.bind("<Enter>", _bind_mousewheel)
+        self.point_scroll_frame.bind("<Leave>", _unbind_mousewheel)
         
         self.point_canvas.pack(side="left", fill="both", expand=True)
         self.point_scroll.pack(side="right", fill="y")
@@ -492,7 +509,12 @@ class App:
         add_entry(point_set_frame, "Min Stable Frames:", self.centering_min_frames, 3)
         add_entry(point_set_frame, "Max Step (deg):", self.centering_max_step, 4)
         add_entry(point_set_frame, "Cooldown (ms):", self.centering_cooldown, 5)
+        add_entry(point_set_frame, "Cooldown (ms):", self.centering_cooldown, 5)
         add_entry(point_set_frame, "LED Settle (s):", self.led_settle, 6)
+        
+        # [NEW] Centering & Marker Toggles in Settings
+        ttk.Checkbutton(point_set_frame, text="Centering Mode (Live Refine)", variable=self.centering_enable, command=self.on_centering_toggle).grid(row=7, column=0, columnspan=2, sticky="w", padx=5, pady=2)
+        ttk.Checkbutton(point_set_frame, text="Show Center Marker", variable=self.show_center_marker).grid(row=8, column=0, columnspan=2, sticky="w", padx=5, pady=2)
 
         # CSV Analysis (Existing)
         point_csv_frame = ttk.LabelFrame(self.point_scroll_frame, text="CSV Analysis (Legacy)")
@@ -513,9 +535,11 @@ class App:
         ttk.Button(point_csv_frame, text="Compute Target", command=self.pointing_compute).pack(anchor="w", padx=5, pady=5)
         self.point_result_lbl = ttk.Label(point_csv_frame, text="Result: -")
         self.point_result_lbl.pack(anchor="w", padx=5, pady=5)
+        
+        # [RESTORED] Move to Target Button
+        ttk.Button(point_csv_frame, text="Move to Target", command=self.pointing_move).pack(anchor="w", padx=5, pady=5)
 
-        for c in range(4):
-            tab_point.grid_columnconfigure(c, weight=1)
+
         # [NEW] Auto-load calib.npz if exists
         if pathlib.Path("calib.npz").exists():
             self.load_npz("calib.npz")
@@ -703,7 +727,12 @@ class App:
         self.root.after(500, lambda: ui_q.put(("preview_on", None)))
 
     def on_centering_toggle(self):
-        if not self.centering_enable.get():
+        if self.centering_enable.get():
+            ui_q.put(("toast", "🚀 Centering Mode Started"))
+            self._centering_state = 0
+            self._centering_stable_cnt = 0
+            self._snap_center_on()
+        else:
             ui_q.put(("preview_on", None))
 
     def on_pointing_toggle(self):
@@ -836,8 +865,12 @@ class App:
             )
             
             if not boxes:
-                ui_q.put(("toast", "[Center] 객체 없음"))
+                ui_q.put(("toast", "[Center] ⚠️ YOLO 객체 없음 (No boxes)"))
                 self._centering_stable_cnt = 0
+                # [DEBUG] Save images for inspection
+                cv2.imwrite("debug_center_on.jpg", img_on)
+                cv2.imwrite("debug_center_off.jpg", img_off)
+                cv2.imwrite("debug_center_diff.jpg", diff)
                 return
 
             # 4. 최고 conf 객체 찾기
@@ -869,6 +902,9 @@ class App:
                     ui_q.put(("toast", f"🎉 Centering 완료! Final: (P={final_pan}, T={final_tilt})"))
                     self.centering_enable.set(False); ui_q.put(("preview_on", None)) # 종료 및 프리뷰 복구
                     return
+                
+                # [FIX] Not yet finished, schedule next check
+                self.root.after(self.centering_cooldown.get(), self._snap_center_on)
             else:
                 self._centering_stable_cnt = 0
                 
@@ -928,11 +964,32 @@ class App:
                     "acc": float(self.acc.get())
                 })
                 # ui_q.put(("toast", f"→ Adjust: dP={d_pan:.2f}, dT={d_tilt:.2f}"))
+                
+                # [FIX] Schedule next cycle
+                self.root.after(self.centering_cooldown.get(), self._snap_center_on)
 
         except Exception as e:
             ui_q.put(("toast", f"❌ Centering Error: {e}"))
             import traceback
             traceback.print_exc()
+
+    # [NEW] Helper to start centering cycle
+    def _snap_center_on(self):
+        if not self.centering_enable.get(): return
+        self._centering_state = 1 # WAIT_ON
+        self.ctrl.send({"cmd":"led", "value":255})
+        wait_ms = int(self.led_settle.get() * 1000)
+        self.root.after(wait_ms, lambda: self.ctrl.send({
+            "cmd":"snap", "width":self.width.get(), "height":self.height.get(),
+            "quality":self.quality.get(), "save":"center_on.jpg", "hard_stop":False
+        }))
+
+    def _snap_center_off(self):
+        if not self.centering_enable.get(): return
+        self.ctrl.send({
+            "cmd":"snap", "width":self.width.get(), "height":self.height.get(),
+            "quality":self.quality.get(), "save":"center_off.jpg", "hard_stop":False
+        })
 
     def _find_laser_center(self, img_on, img_off, roi_size=200):
         h, w = img_on.shape[:2]
@@ -1271,14 +1328,24 @@ class App:
                             nparr = np.frombuffer(data, np.uint8)
                             self._centering_off_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                             self._set_preview(data) # [NEW] Show captured image
+                            
+                            # [FIX] Run Centering Logic
+                            # [FIX] Run Centering Logic
+                            if self._centering_on_img is not None and self._centering_off_img is not None:
+                                ui_q.put(("toast", "🚀 Centering Logic Start"))
+                                threading.Thread(target=self._run_centering_logic, args=(self._centering_on_img, self._centering_off_img), daemon=True).start()
+                            else:
+                                ui_q.put(("toast", "❌ Centering Images Missing"))
+                                self._centering_state = 0
+                                self.resume_preview(); self._resume_preview_after_snap = False
+                        except Exception as e:
+                            print(f"[Centering] Error: {e}")
                             self._centering_state = 0
-                            self._centering_last_ts = time.time() * 1000
-                            self.resume_preview(); self._resume_preview_after_snap = False
-                        except: self._centering_state = 0
 
                     # [NEW] Pointing Mode Handlers
                     elif name == "pointing_laser_on.jpg":
                         self._pointing_state = 2 # WAIT_LASER_OFF
+                        self._set_preview(data) # [NEW] Preview
                         self.ctrl.send({"cmd":"laser", "value":0})
                         wait_ms = int(self.led_settle.get() * 1000)
                         self.root.after(wait_ms, lambda: self.ctrl.send({
@@ -1288,6 +1355,7 @@ class App:
                         
                     elif name == "pointing_laser_off.jpg":
                         self._pointing_state = 3 # PROCESSING_LASER
+                        self._set_preview(data) # [NEW] Preview
                         path_on = DEFAULT_OUT_DIR / "pointing_laser_on.jpg"
                         path_off = DEFAULT_OUT_DIR / "pointing_laser_off.jpg"
                         try:
@@ -1303,6 +1371,7 @@ class App:
 
                     elif name == "pointing_led_on.jpg":
                         self._pointing_state = 5 # WAIT_LED_OFF
+                        self._set_preview(data) # [NEW] Preview
                         self.ctrl.send({"cmd":"led", "value":0})
                         wait_ms = int(self.led_settle.get() * 1000)
                         self.root.after(wait_ms, lambda: self.ctrl.send({
@@ -1312,6 +1381,7 @@ class App:
 
                     elif name == "pointing_led_off.jpg":
                         self._pointing_state = 6 # PROCESSING_OBJECT
+                        self._set_preview(data) # [NEW] Preview
                         path_on = DEFAULT_OUT_DIR / "pointing_led_on.jpg"
                         path_off = DEFAULT_OUT_DIR / "pointing_led_off.jpg"
                         try:
@@ -1325,78 +1395,11 @@ class App:
                             print(f"[Pointing] Object Load Error: {e}")
                             self._pointing_state = 0
 
-                    else:
-                        self.dl_lbl.config(text=f"DL {len(data)}")
-                        # [NEW] Show scanned image in preview
-                        self._set_preview(data)
-                        
-                        # [RESTORED] Save undistorted copy if enabled
-                        if self.ud_save_copy.get() and self._ud_K is not None:
-                             try:
-                                 nparr = np.frombuffer(data, np.uint8)
-                                 bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                                 if bgr is not None:
-                                     ud = self._undistort_bgr(bgr)
-                                     # name is like "img_t..._p..._....jpg"
-                                     # save as "img_t..._p..._....ud.jpg"
-                                     base, ext = os.path.splitext(name)
-                                     ud_name = f"{base}.ud{ext}"
-                                     ud_path = DEFAULT_OUT_DIR / ud_name
-                                     cv2.imwrite(str(ud_path), ud)
-                             except Exception as e:
-                                 print(f"[UD Save] Error: {e}")
 
-                        if self._resume_preview_after_snap:
-                            self.resume_preview(); self._resume_preview_after_snap = False
 
-                    # [NEW] Pointing Mode Handlers
-                    elif name == "pointing_laser_on.jpg":
-                        self._pointing_state = 2 # WAIT_LASER_OFF
-                        self.ctrl.send({"cmd":"laser", "value":0})
-                        wait_ms = int(self.led_settle.get() * 1000)
-                        self.root.after(wait_ms, lambda: self.ctrl.send({
-                            "cmd":"snap", "width":self.width.get(), "height":self.height.get(),
-                            "quality":self.quality.get(), "save":"pointing_laser_off.jpg", "hard_stop":False
-                        }))
-                        
-                    elif name == "pointing_laser_off.jpg":
-                        self._pointing_state = 3 # PROCESSING_LASER
-                        path_on = DEFAULT_OUT_DIR / "pointing_laser_on.jpg"
-                        path_off = DEFAULT_OUT_DIR / "pointing_laser_off.jpg"
-                        try:
-                            nparr_on = np.fromfile(path_on, np.uint8)
-                            img_on = cv2.imdecode(nparr_on, cv2.IMREAD_COLOR)
-                            nparr_off = np.fromfile(path_off, np.uint8)
-                            img_off = cv2.imdecode(nparr_off, cv2.IMREAD_COLOR)
-                            if img_on is not None and img_off is not None:
-                                threading.Thread(target=self._run_pointing_laser_logic, args=(img_on, img_off), daemon=True).start()
-                        except Exception as e:
-                            print(f"[Pointing] Laser Load Error: {e}")
-                            self._pointing_state = 0
 
-                    elif name == "pointing_led_on.jpg":
-                        self._pointing_state = 5 # WAIT_LED_OFF
-                        self.ctrl.send({"cmd":"led", "value":0})
-                        wait_ms = int(self.led_settle.get() * 1000)
-                        self.root.after(wait_ms, lambda: self.ctrl.send({
-                            "cmd":"snap", "width":self.width.get(), "height":self.height.get(),
-                            "quality":self.quality.get(), "save":"pointing_led_off.jpg", "hard_stop":False
-                        }))
 
-                    elif name == "pointing_led_off.jpg":
-                        self._pointing_state = 6 # PROCESSING_OBJECT
-                        path_on = DEFAULT_OUT_DIR / "pointing_led_on.jpg"
-                        path_off = DEFAULT_OUT_DIR / "pointing_led_off.jpg"
-                        try:
-                            nparr_on = np.fromfile(path_on, np.uint8)
-                            img_on = cv2.imdecode(nparr_on, cv2.IMREAD_COLOR)
-                            nparr_off = np.fromfile(path_off, np.uint8)
-                            img_off = cv2.imdecode(nparr_off, cv2.IMREAD_COLOR)
-                            if img_on is not None and img_off is not None:
-                                threading.Thread(target=self._run_pointing_object_logic, args=(img_on, img_off), daemon=True).start()
-                        except Exception as e:
-                            print(f"[Pointing] Object Load Error: {e}")
-                            self._pointing_state = 0
+
 
                     else:
                         self.dl_lbl.config(text=f"DL {len(data)}")
