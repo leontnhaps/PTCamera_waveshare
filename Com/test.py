@@ -1109,6 +1109,8 @@ class App:
         except Exception as e:
             ui_q.put(("toast", f"❌ Pointing Object Error: {e}"))
             self._pointing_state = 0
+
+    def _poll(self):
         # [NEW] Centering Trigger Check
         if self.centering_enable.get() and self._centering_state == 0:
             now = time.time() * 1000
