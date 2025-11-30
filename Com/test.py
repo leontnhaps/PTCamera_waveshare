@@ -237,8 +237,8 @@ class App:
         self._resume_preview_after_snap = False
 
         # undistort state
-        self.ud_enable    = BooleanVar(value=False)
-        self.ud_save_copy = BooleanVar(value=False)
+        self.ud_enable    = BooleanVar(value=True)
+        self.ud_save_copy = BooleanVar(value=True)
         self.ud_alpha     = DoubleVar(value=0.0)
 
         self._ud_model = None
@@ -268,7 +268,7 @@ class App:
         # ===================================
 
         # ==== YOLO 관련 변수 ====
-        self.yolo_wpath = StringVar(value="")  # YOLO 가중치 경로
+        self.yolo_wpath = StringVar(value="yolov11m_diff.pt")  # YOLO 가중치 경로
         self._scan_yolo_conf = 0.50  # YOLO confidence threshold
         self._scan_yolo_imgsz = 832  # YOLO image size
         # ========================
@@ -386,7 +386,7 @@ class App:
         misc = misc_sf.body  # ← 앞으로 이걸 parent로 써요
 
         self.preview_enable=BooleanVar(value=True)
-        self.preview_w=IntVar(value=640); self.preview_h=IntVar(value=360)
+        self.preview_w=IntVar(value=2592); self.preview_h=IntVar(value=1944)
         self.preview_fps=IntVar(value=5); self.preview_q=IntVar(value=70)
 
         Checkbutton(misc, text="Live Preview", variable=self.preview_enable, command=self.toggle_preview)\
@@ -461,7 +461,7 @@ class App:
         self.centering_max_step = DoubleVar(value=1.0) # 한번에 움직일 최대 각도(°)
         self.centering_cooldown = IntVar(value=250)    # 명령 간 최소 간격(ms)
 
-        Checkbutton(tab_point, text="Centering mode (live refine)", variable=self.centering_enable)\
+        Checkbutton(tab_point, text="Centering mode (live refine)", variable=self.centering_enable, command=self.on_centering_toggle)\
             .grid(row=16, column=0, sticky="w")
         
         self.show_center_marker = BooleanVar(value=False)
@@ -486,26 +486,31 @@ class App:
 
         for c in range(4):
             tab_point.grid_columnconfigure(c, weight=1)
+        # [NEW] Auto-load calib.npz if exists
+        if pathlib.Path("calib.npz").exists():
+            self.load_npz("calib.npz")
 
+    def run(self):
+        self.root.mainloop()
 
-        # Laser tracking 제거됨
-
-    
-    # ========= Undistort helpers =========
-    def load_npz(self):
-        path = filedialog.askopenfilename(filetypes=[("NPZ","*.npz")])
+    def load_npz(self, path=None):
+        if path is None:
+            path = filedialog.askopenfilename(filetypes=[("NPZ","*.npz")])
         if not path: return
-        cal = np.load(path, allow_pickle=True)
-        self._ud_model = str(cal["model"])
-        self._ud_K = cal["K"].astype(np.float32)
-        self._ud_D = cal["D"].astype(np.float32)
-        self._ud_img_size = tuple(int(x) for x in cal["img_size"])
-        self._ud_src_size = None
-        self._ud_m1 = self._ud_m2 = None
-        self._ud_gm1 = self._ud_gm2 = None
-        self._ud_torch_grid = None
-        self._ud_torch_grid_wh = None
-        print(f"[UD] loaded calib: model={self._ud_model}, img_size={self._ud_img_size}, cv2.cuda={self._use_cv2_cuda}, torch_cuda={self._torch_cuda}")
+        try:
+            cal = np.load(path, allow_pickle=True)
+            self._ud_model = str(cal["model"])
+            self._ud_K = cal["K"].astype(np.float32)
+            self._ud_D = cal["D"].astype(np.float32)
+            self._ud_img_size = tuple(int(x) for x in cal["img_size"])
+            self._ud_src_size = None
+            self._ud_m1 = self._ud_m2 = None
+            self._ud_gm1 = self._ud_gm2 = None
+            self._ud_torch_grid = None
+            self._ud_torch_grid_wh = None
+            print(f"[UD] loaded calib: model={self._ud_model}, img_size={self._ud_img_size}, cv2.cuda={self._use_cv2_cuda}, torch_cuda={self._torch_cuda}")
+        except Exception as e:
+            print(f"[UD] Load failed: {e}")
 
     def _scale_K(self, K, sx, sy):
         K2 = K.copy()
@@ -663,7 +668,13 @@ class App:
             "session":datetime.now().strftime("scan_%Y%m%d_%H%M%S"),
             "hard_stop":self.hard_stop.get()
         })
-    def stop_scan(self): self.ctrl.send({"cmd":"scan_stop"})
+    def stop_scan(self):
+        self.ctrl.send({"cmd":"scan_stop"})
+        self.root.after(500, lambda: ui_q.put(("preview_on", None)))
+
+    def on_centering_toggle(self):
+        if not self.centering_enable.get():
+            ui_q.put(("preview_on", None))
     def center(self): self.ctrl.send({"cmd":"move","pan":0.0,"tilt":0.0,"speed":self.speed.get(),"acc":float(self.acc.get())})
     def apply_move(self): self.ctrl.send({"cmd":"move","pan":float(self.mv_pan.get()),"tilt":float(self.mv_tilt.get()),
                                           "speed":self.mv_speed.get(),"acc":float(self.mv_acc.get())})
@@ -815,7 +826,7 @@ class App:
                     final_pan = round(self._curr_pan, 2)
                     final_tilt = round(self._curr_tilt, 2)
                     ui_q.put(("toast", f"🎉 Centering 완료! Final: (P={final_pan}, T={final_tilt})"))
-                    self.centering_enable.set(False) # 종료
+                    self.centering_enable.set(False); ui_q.put(("preview_on", None)) # 종료 및 프리뷰 복구
                     return
             else:
                 self._centering_stable_cnt = 0
@@ -1004,7 +1015,7 @@ class App:
                                     self._scan_csv_file = None
                                     self._scan_csv_writer = None
                                     
-                                ui_q.put(("toast", f"✅ 완료: {csv_path} ({detected_count}개)"))
+                                ui_q.put(("toast", f"✅ 완료: {csv_path} ({detected_count}개)")); ui_q.put(("preview_on", None))
                             except Exception as e:
                                 ui_q.put(("toast", f"❌ 에러: {e}"))
                                 import traceback; traceback.print_exc()
@@ -1060,6 +1071,10 @@ class App:
 
                 elif tag == "toast":
                     print(f"[TOAST] {payload}")
+
+                elif tag == "preview_on":
+                    self.preview_enable.set(True)
+                    self.toggle_preview()
 
         except queue.Empty:
             pass
