@@ -13,10 +13,7 @@ import RPi.GPIO as GPIO
 
 # ===================== GPIO 설정 (레이저 제어) =====================
 LASER_PIN = 15  # BCM 15번 핀 (물리적 핀 10번)
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(LASER_PIN, GPIO.OUT)
-GPIO.output(LASER_PIN, GPIO.LOW)  # 초기 상태: OFF
-print(f"[GPIO] Laser control initialized on BCM pin {LASER_PIN}")
+# GPIO Setup moved to main execution block
 
 # ===================== 환경 설정 =====================
 #DEFAULT_SERVER_HOST = "192.168.0.9" # 711a
@@ -344,7 +341,9 @@ def main():
     GPIO.cleanup()
     print("[GPIO] Cleanup done")
 
+if __name__ == "__main__":
     # [NEW] Laser Init (Force OFF)
+    GPIO.setmode(GPIO.BCM)
     GPIO.setup(LASER_PIN, GPIO.OUT, initial=GPIO.LOW)
     print("[LASER] Initialized to OFF")
 
