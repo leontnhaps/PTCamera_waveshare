@@ -23,6 +23,15 @@ except Exception:
     _TORCH_AVAILABLE = False
 # =============================================================
 
+# ==== YOLO (for LED difference detection) ====
+try:
+    from ultralytics import YOLO
+    _YOLO_OK = True
+except Exception:
+    YOLO = None
+    _YOLO_OK = False
+# =============================================
+
 SERVER_HOST = "127.0.0.1"
 GUI_CTRL_PORT = 7600
 GUI_IMG_PORT  = 7601
@@ -168,6 +177,11 @@ class App:
         self._ud_torch_grid_wh = None   # (w,h)
         # ===================================
 
+        # ==== YOLO 관련 변수 ====
+        self.yolo_wpath = StringVar(value="")  # YOLO 가중치 경로
+        self._scan_yolo_conf = 0.50  # YOLO confidence threshold
+        self._scan_yolo_imgsz = 832  # YOLO image size
+        # ========================
 
         print(f"[INFO] cv2.cuda={self._use_cv2_cuda}, torch_cuda={self._torch_cuda}")
 
@@ -306,7 +320,12 @@ class App:
             variable=self.ud_alpha, command=lambda v: setattr(self, "_ud_src_size", None))\
             .grid(row=row, column=1, sticky="w"); row+=1
 
-        # ==== YOLO UI 제거됨 ====
+        # ==== YOLO UI ====
+        ttk.Separator(misc, orient="horizontal").grid(row=row, column=0, columnspan=4, sticky="ew", pady=(8,6)); row+=1
+        Label(misc, text="YOLO 가중치 (.pt)").grid(row=row, column=0, sticky="w")
+        Button(misc, text="Load YOLO", command=self.load_yolo_weights)\\\r
+            .grid(row=row, column=1, sticky="w", pady=2); row+=1
+        # ==================
 
         # (있으면) 이 줄도 추가해두면 너비 늘어날 때 경로 라벨이 자연스럽게 늘어남
         for c in range(4):
@@ -517,6 +536,13 @@ class App:
             global DEFAULT_OUT_DIR
             DEFAULT_OUT_DIR = pathlib.Path(d)
 
+    def load_yolo_weights(self):
+        """YOLO 가중치 파일 (.pt) 로드"""
+        path = filedialog.askopenfilename(filetypes=[("YOLO weights", "*.pt"), ("All files", "*.*")])
+        if path:
+            self.yolo_wpath.set(path)
+            ui_q.put(("toast", f"YOLO 가중치 로드: {pathlib.Path(path).name}"))
+
     # actions
     def start_scan(self):
     # 보정 강제: calib.npz가 로드되지 않았으면 스캔 시작 금지
@@ -626,17 +652,123 @@ class App:
                         name = evt.get("name","")
                         if name: self.last_lbl.config(text=f"Last: {name}")
                     elif et == "done":
-                        # === CSV 닫기 ===
-                        if self._scan_csv_file:
+                        # === 스캔 완료 후 LED ON/OFF 차분 이미지 처리 + YOLO + CSV 저장 ===
+                        ui_q.put(("toast", "[SCAN] 스캔 완료! LED ON/OFF 차분 이미지 처리 시작..."))
+                        
+                        # 백그라운드 스레드에서 처리
+                        def process_diff_and_yolo():
                             try:
-                                self._scan_csv_file.flush()
-                                self._scan_csv_file.close()
-                            except Exception:
-                                pass
-                            finally:
-                                self._scan_csv_file = None
-                                self._scan_csv_writer = None
-                                ui_q.put(("toast", f"CSV 저장 완료: {self._scan_csv_path}"))
+                                import glob
+                                from collections import defaultdict
+                                
+                                # 1. LED ON/OFF 이미지 그룹화
+                                led_on_files = sorted(glob.glob(str(DEFAULT_OUT_DIR / "*_led_on.jpg")))
+                                led_off_files = sorted(glob.glob(str(DEFAULT_OUT_DIR / "*_led_off.jpg")))
+                                
+                                # 파일명에서 pan/tilt 추출하여 매칭
+                                pairs = defaultdict(dict)
+                                fname_re = re.compile(r"img_t(?P<tilt>[+\-]\d{2,3})_p(?P<pan>[+\-]\d{2,3})_.*_led_(?P<state>on|off)\.jpg$", re.IGNORECASE)
+                                
+                                for fpath in led_on_files + led_off_files:
+                                    fname = os.path.basename(fpath)
+                                    m = fname_re.search(fname)
+                                    if m:
+                                        pan = int(m.group("pan"))
+                                        tilt = int(m.group("tilt"))
+                                        state = m.group("state")
+                                        key = (pan, tilt)
+                                        pairs[key][state] = fpath
+                                
+                                ui_q.put(("toast", f"[DIFF] {len(pairs)}개 위치의 LED ON/OFF 쌍 발견"))
+                                
+                                # 2. CSV 파일 생성
+                                sess = evt.get("session") or datetime.now().strftime("scan_%Y%m%d_%H%M%S")
+                                csv_path = DEFAULT_OUT_DIR / f"{sess}_detections.csv"
+                                
+                                with open(csv_path, "w", newline="", encoding="utf-8") as csvfile:
+                                    writer = csv.writer(csvfile)
+                                    writer.writerow(["pan_deg", "tilt_deg", "cx", "cy", "w", "h", "conf", "cls", "W", "H"])
+                                    
+                                    # 3. YOLO 모델 로드 (GPU 사용)
+                                    if not _YOLO_OK:
+                                        ui_q.put(("toast", "❌ YOLO가 설치되지 않았습니다 - CSV는 빈 파일로 저장됩니다"))
+                                        return
+                                    
+                                    yolo_wpath = self.yolo_wpath.get().strip()
+                                    if not yolo_wpath:
+                                        ui_q.put(("toast", "⚠️ YOLO 가중치 없음 - CSV는 빈 파일로 저장됩니다"))
+                                        return
+                                    
+                                    yolo_model = YOLO(yolo_wpath)
+                                    device = "cuda" if (torch and torch.cuda.is_available()) else "cpu"
+                                    ui_q.put(("toast", f"[YOLO] Using device: {device}"))
+                                    
+                                    # 4. 각 위치별로 차분 이미지 생성 + YOLO 실행
+                                    total_pairs = len(pairs)
+                                    processed = 0
+                                    detected_count = 0
+                                    
+                                    for (pan, tilt), files in sorted(pairs.items()):
+                                        if "on" not in files or "off" not in files:
+                                            continue  # ON/OFF 쌍이 없으면 스킵
+                                        
+                                        # LED ON/OFF 이미지 로드
+                                        img_on = cv2.imread(files["on"])
+                                        img_off = cv2.imread(files["off"])
+                                        
+                                        if img_on is None or img_off is None:
+                                            continue
+                                        
+                                        # ★★★ Calibration 적용 (반드시!) ★★★
+                                        if self._ud_K is not None and self._ud_D is not None:
+                                            img_on = self._undistort_bgr(img_on)
+                                            img_off = self._undistort_bgr(img_off)
+                                        else:
+                                            ui_q.put(("toast", "⚠️ Calibration 파라미터 없음 - 원본 이미지 사용"))
+                                        
+                                        # 차분 이미지 계산 (절대값)
+                                        diff = cv2.absdiff(img_on, img_off)
+                                        
+                                        H, W = diff.shape[:2]
+                                        
+                                        # YOLO 실행 (차분 이미지에 대해)
+                                        results = yolo_model.predict(
+                                            diff,
+                                            imgsz=self._scan_yolo_imgsz,
+                                            conf=self._scan_yolo_conf,
+                                            iou=0.45,
+                                            device=device,
+                                            verbose=False
+                                        )[0]
+                                        
+                                        # 검출 결과 CSV에 저장
+                                        if results.boxes is not None and len(results.boxes) > 0:
+                                            for b in results.boxes:
+                                                conf = float(b.conf.cpu().item() or 0.0)
+                                                if conf < self._scan_yolo_conf:
+                                                    continue
+                                                cls = int(b.cls.cpu().item() or -1)
+                                                x1, y1, x2, y2 = b.xyxy[0].cpu().numpy().tolist()
+                                                cx = 0.5 * (x1 + x2)
+                                                cy = 0.5 * (y1 + y2)
+                                                writer.writerow([pan, tilt, cx, cy, x2-x1, y2-y1, conf, cls, W, H])
+                                                detected_count += 1
+                                        
+                                        processed += 1
+                                        if processed % 10 == 0:
+                                            ui_q.put(("toast", f"[DIFF+YOLO] 처리 중... {processed}/{total_pairs} (검출: {detected_count})"))
+                                
+                                ui_q.put(("toast", f"✅ CSV 저장 완료: {csv_path} (총 {detected_count}개 검출)"))
+                                
+                            except Exception as e:
+                                ui_q.put(("toast", f"❌ 차분 처리 실패: {e}"))
+                                import traceback
+                                traceback.print_exc()
+                        
+                        # 백그라운드 스레드 시작
+                        threading.Thread(target=process_diff_and_yolo, daemon=True).start()
+                        
+                        # 프리뷰 재개
                         if self.preview_enable.get():
                             self.toggle_preview()
 
