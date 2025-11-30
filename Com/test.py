@@ -379,6 +379,8 @@ class App:
         Button(tab_manual, text="Apply Move", command=self.apply_move).grid(row=4,column=1,sticky="e",pady=4)
         self._slider(tab_manual,5,"LED",0,255,self.led,1)
         Button(tab_manual, text="Set LED", command=self.set_led).grid(row=6,column=1,sticky="e",pady=4)
+        self.laser_on = BooleanVar(value=False)
+        Button(tab_manual, text="Laser ON/OFF", command=self.toggle_laser).grid(row=6,column=2,sticky="w",padx=4,pady=4)
 
         # preview settings
         misc_sf = ScrollFrame(tab_misc)
@@ -452,6 +454,15 @@ class App:
         self._centering_last_ts = 0
         self._centering_ok_frames = 0
         self._centering_last_ms = 0
+        
+        # Pointing state
+        self._pointing_state = 0 # 0:IDLE, 1:LASER_ON, 2:LASER_OFF, 3:LED_ON, 4:LED_OFF
+        self._pointing_laser_on_img = None
+        self._pointing_laser_off_img = None
+        self._pointing_led_on_img = None
+        self._pointing_led_off_img = None
+        self._pointing_stable_cnt = 0
+        self._pointing_last_ts = 0
 
         ttk.Separator(tab_point, orient="horizontal").grid(row=15, column=0, columnspan=4, sticky="ew", pady=(8,6))
 
@@ -483,6 +494,17 @@ class App:
         # self.led_settle is defined in Scan tab section
         Label(tab_point, text="LED settle(s)").grid(row=18, column=0, sticky="e")
         ttk.Entry(tab_point, width=6, textvariable=self.led_settle).grid(row=18, column=1, sticky="w")
+
+        ttk.Separator(tab_point, orient="horizontal").grid(row=19, column=0, columnspan=4, sticky="ew", pady=(8,6))
+
+        self.pointing_enable = BooleanVar(value=False)
+        self.pointing_roi_size = IntVar(value=200)
+        
+        Checkbutton(tab_point, text="Pointing Mode (Laser Target)", variable=self.pointing_enable, command=self.on_pointing_toggle)\
+            .grid(row=20, column=0, sticky="w")
+            
+        Label(tab_point, text="Laser ROI").grid(row=20, column=1, sticky="e")
+        ttk.Entry(tab_point, width=6, textvariable=self.pointing_roi_size).grid(row=20, column=2, sticky="w")
 
         for c in range(4):
             tab_point.grid_columnconfigure(c, weight=1)
@@ -675,10 +697,21 @@ class App:
     def on_centering_toggle(self):
         if not self.centering_enable.get():
             ui_q.put(("preview_on", None))
+
+    def on_pointing_toggle(self):
+        if not self.pointing_enable.get():
+            ui_q.put(("preview_on", None))
+            # Laser OFF when stopping
+            self.ctrl.send({"cmd":"laser", "value": 0})
+            self.laser_on.set(False)
     def center(self): self.ctrl.send({"cmd":"move","pan":0.0,"tilt":0.0,"speed":self.speed.get(),"acc":float(self.acc.get())})
     def apply_move(self): self.ctrl.send({"cmd":"move","pan":float(self.mv_pan.get()),"tilt":float(self.mv_tilt.get()),
                                           "speed":self.mv_speed.get(),"acc":float(self.mv_acc.get())})
     def set_led(self): self.ctrl.send({"cmd":"led","value":int(self.led.get())})
+    def toggle_laser(self):
+        val = 1 if not self.laser_on.get() else 0
+        self.laser_on.set(bool(val))
+        self.ctrl.send({"cmd":"laser", "value": val})
 
     def toggle_preview(self):
         if self.preview_enable.get():
@@ -893,12 +926,200 @@ class App:
             import traceback
             traceback.print_exc()
 
-    def _poll(self):
+    def _find_laser_center(self, img_on, img_off, roi_size=200):
+        h, w = img_on.shape[:2]
+        cx, cy = w // 2, h // 2
+        half = roi_size // 2
+        x1 = max(0, cx - half); y1 = max(0, cy - half)
+        x2 = min(w, cx + half); y2 = min(h, cy + half)
+        
+        roi_on = img_on[y1:y2, x1:x2]
+        roi_off = img_off[y1:y2, x1:x2]
+        
+        g1 = cv2.cvtColor(roi_on, cv2.COLOR_BGR2GRAY)
+        g2 = cv2.cvtColor(roi_off, cv2.COLOR_BGR2GRAY)
+        g1 = cv2.GaussianBlur(g1, (5,5), 0)
+        g2 = cv2.GaussianBlur(g2, (5,5), 0)
+        diff = cv2.absdiff(g1, g2)
+        _, bin_img = cv2.threshold(diff, 30, 255, cv2.THRESH_BINARY)
+        
+        contours, _ = cv2.findContours(bin_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours: return None
+        
+        largest = max(contours, key=cv2.contourArea)
+        M = cv2.moments(largest)
+        if M["m00"] == 0: return None
+        
+        lcx = int(M["m10"] / M["m00"])
+        lcy = int(M["m01"] / M["m00"])
+        return (lcx + x1, lcy + y1)
+
+    # ==== Pointing Mode Logic ====
+    def _start_pointing_cycle(self):
+        # 1. Laser ON
+        self._pointing_state = 1 # WAIT_LASER_ON
+        self.ctrl.send({"cmd":"laser", "value":1})
+        wait_ms = int(self.led_settle.get() * 1000)
+        self.root.after(wait_ms, lambda: self.ctrl.send({
+            "cmd":"snap", "width":self.width.get(), "height":self.height.get(),
+            "quality":self.quality.get(), "save":"pointing_laser_on.jpg", "hard_stop":False
+        }))
+
+    def _run_pointing_laser_logic(self, img_on, img_off):
+        try:
+            if self._ud_K is not None:
+                img_on = self._undistort_bgr(img_on)
+                img_off = self._undistort_bgr(img_off)
+            
+            laser_pos = self._find_laser_center(img_on, img_off, self.pointing_roi_size.get())
+            
+            if laser_pos is None:
+                # Blind Search: Tilt Down 1 deg
+                ui_q.put(("toast", "⚠️ Laser not found -> Blind Search (Tilt -1°)"))
+                next_tilt = self._curr_tilt - 1.0
+                next_tilt = max(-30, min(90, next_tilt)) # Limit
+                self._curr_tilt = next_tilt
+                self.ctrl.send({"cmd":"move", "pan":self._curr_pan, "tilt":next_tilt, "speed":self.speed.get(), "acc":float(self.acc.get())})
+                
+                # End cycle, wait for cooldown
+                self._pointing_state = 0
+                self._pointing_last_ts = time.time() * 1000
+                return
+
+            # Laser Found -> Proceed to Object Detection
+            self._laser_px = laser_pos
+            ui_q.put(("toast", f"✅ Laser Found: {laser_pos}"))
+            
+            # Trigger LED ON
+            ui_q.put(("pointing_step_2", None))
+            
+        except Exception as e:
+            ui_q.put(("toast", f"❌ Pointing Laser Error: {e}"))
+            self._pointing_state = 0
+
+    def _run_pointing_object_logic(self, img_on, img_off):
+        try:
+            if self._ud_K is not None:
+                img_on = self._undistort_bgr(img_on)
+                img_off = self._undistort_bgr(img_off)
+            
+            diff = cv2.absdiff(img_on, img_off)
+            
+            if not _YOLO_OK:
+                ui_q.put(("toast", "❌ YOLO 없음"))
+                self._pointing_state = 0; return
+
+            yolo_wpath = self.yolo_wpath.get().strip()
+            model = YOLO(yolo_wpath)
+            device = "cuda" if (torch and torch.cuda.is_available()) else "cpu"
+            
+            boxes, scores, classes = predict_with_tiling(model, diff, rows=2, cols=3, overlap=0.15, conf=0.20, iou=0.45, device=device)
+            
+            if not boxes:
+                ui_q.put(("toast", "⚠️ Object not found -> Retry"))
+                self._pointing_state = 0; return # Retry next cycle
+
+            # Find closest to center
+            H, W = diff.shape[:2]
+            cx, cy = W/2, H/2
+            best_idx = -1; min_dist = 999999
+            
+            for i, (x, y, w, h) in enumerate(boxes):
+                obj_cx = x + w/2; obj_cy = y + h/2
+                dist = (obj_cx - cx)**2 + (obj_cy - cy)**2
+                if dist < min_dist:
+                    min_dist = dist; best_idx = i
+            
+            x, y, w, h = boxes[best_idx]
+            obj_cx = x + w/2; obj_cy = y + h/2
+            
+            # Target Calculation (5cm below center)
+            # Assume object is 5cm x 5cm
+            px_per_cm = w / 5.0
+            target_y_offset = 5.0 * px_per_cm
+            target_px = (obj_cx, obj_cy + target_y_offset)
+            
+            # Error (Target - Laser)
+            # We want to move Camera so that Laser hits Target.
+            # Actually, Laser is fixed to Camera.
+            # So we want to move Camera so that Laser point (fixed in frame) overlaps with Target point (in frame).
+            # Wait, if we move Camera, the Scene moves.
+            # If we want Laser (fixed px) to be at Target (scene px), we need to move Camera.
+            # If Target is at (100, 100) and Laser is at (200, 200).
+            # We need to move Camera so that Target moves to (200, 200).
+            # To move Scene Point (100,100) to (200,200) (Right, Down), we need to Pan Left, Tilt Up?
+            # Let's check coordinate system.
+            # Pan + -> Camera Right -> Image Left.
+            # Tilt + -> Camera Up -> Image Down.
+            # We want Image Point to move from (100,100) to (200,200). (+100, +100).
+            # So we need Pan Left (Pan -) and Tilt Up (Tilt +)?
+            # Error = Target - Laser = (100-200, 100-200) = (-100, -100).
+            # If we use Error directly:
+            # d_pan = -100 * k. (Pan -). Correct.
+            # d_tilt = -100 * k. (Tilt -). Wait.
+            # If Tilt - -> Camera Down -> Image Up.
+            # We want Image Down. So we need Tilt +.
+            # So d_tilt should be positive.
+            # So d_tilt = -Error_y * k?
+            # Error_y = -100. -(-100) = +100. Correct.
+            
+            err_x = target_px[0] - self._laser_px[0]
+            err_y = target_px[1] - self._laser_px[1]
+            
+            ui_q.put(("toast", f"Err:({err_x:.1f}, {err_y:.1f}) L:{self._laser_px} T:{target_px}"))
+            
+            # Convergence
+            tol = self.centering_px_tol.get()
+            if abs(err_x) <= tol and abs(err_y) <= tol:
+                self._pointing_stable_cnt += 1
+                ui_q.put(("toast", f"✅ Pointing Converging... {self._pointing_stable_cnt}/{self.centering_min_frames.get()}"))
+                if self._pointing_stable_cnt >= self.centering_min_frames.get():
+                    ui_q.put(("toast", "🎉 Pointing Complete!"))
+                    self.pointing_enable.set(False); ui_q.put(("preview_on", None))
+                    self.ctrl.send({"cmd":"laser", "value":0}); self.laser_on.set(False)
+                    self._pointing_state = 0
+                    return
+            else:
+                self._pointing_stable_cnt = 0
+                
+                # Move
+                k_pan = 0.02; k_tilt = 0.02
+                d_pan = err_x * k_pan
+                d_tilt = -err_y * k_tilt
+                
+                max_step = self.centering_max_step.get()
+                d_pan = max(min(d_pan, max_step), -max_step)
+                d_tilt = max(min(d_tilt, max_step), -max_step)
+                
+                next_pan = self._curr_pan + d_pan
+                next_tilt = self._curr_tilt + d_tilt
+                
+                # Hardware limits
+                next_pan = max(-180, min(180, next_pan))
+                next_tilt = max(-30, min(90, next_tilt))
+                
+                self._curr_pan = next_pan
+                self._curr_tilt = next_tilt
+                
+                self.ctrl.send({"cmd":"move", "pan":next_pan, "tilt":next_tilt, "speed":self.speed.get(), "acc":float(self.acc.get())})
+            
+            self._pointing_state = 0 # Cycle Done
+            self._pointing_last_ts = time.time() * 1000
+
+        except Exception as e:
+            ui_q.put(("toast", f"❌ Pointing Object Error: {e}"))
+            self._pointing_state = 0
         # [NEW] Centering Trigger Check
         if self.centering_enable.get() and self._centering_state == 0:
             now = time.time() * 1000
             if now - self._centering_last_ts > self.centering_cooldown.get():
                 self._start_centering_cycle()
+
+        # [NEW] Pointing Trigger Check
+        if self.pointing_enable.get() and self._pointing_state == 0:
+            now = time.time() * 1000
+            if now - self._pointing_last_ts > self.centering_cooldown.get():
+                self._start_pointing_cycle()
 
         try:
             while True:
@@ -1042,35 +1263,19 @@ class App:
                             self._set_preview(data) # [NEW] Show captured image
                             self._centering_state = 0
                             self._centering_last_ts = time.time() * 1000
-                            if self._centering_on_img is not None and self._centering_off_img is not None:
-                                threading.Thread(target=self._run_centering_logic, args=(self._centering_on_img, self._centering_off_img), daemon=True).start()
-                        except: self._centering_state = 0
-                    else:
-                        self.dl_lbl.config(text=f"DL {len(data)}")
-                        # [NEW] Show scanned image in preview
-                        self._set_preview(data)
-                        
-                        # [RESTORED] Save undistorted copy if enabled
-                        if self.ud_save_copy.get() and self._ud_K is not None:
-                             try:
-                                 nparr = np.frombuffer(data, np.uint8)
-                                 bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                                 if bgr is not None:
-                                     ud = self._undistort_bgr(bgr)
-                                     # name is like "img_t..._p..._....jpg"
-                                     # save as "img_t..._p..._....ud.jpg"
-                                     base, ext = os.path.splitext(name)
-                                     ud_name = f"{base}.ud{ext}"
-                                     ud_path = DEFAULT_OUT_DIR / ud_name
-                                     cv2.imwrite(str(ud_path), ud)
-                             except Exception as e:
-                                 print(f"[UD Save] Error: {e}")
-
-                        if self._resume_preview_after_snap:
                             self.resume_preview(); self._resume_preview_after_snap = False
 
                 elif tag == "toast":
                     print(f"[TOAST] {payload}")
+
+                elif tag == "pointing_step_2":
+                    self._pointing_state = 4 # WAIT_LED_ON
+                    self.ctrl.send({"cmd":"led", "value":255})
+                    wait_ms = int(self.led_settle.get() * 1000)
+                    self.root.after(wait_ms, lambda: self.ctrl.send({
+                        "cmd":"snap", "width":self.width.get(), "height":self.height.get(),
+                        "quality":self.quality.get(), "save":"pointing_led_on.jpg", "hard_stop":False
+                    }))
 
                 elif tag == "preview_on":
                     self.preview_enable.set(True)
