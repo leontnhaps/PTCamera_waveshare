@@ -1264,6 +1264,7 @@ class App:
                             self._centering_state = 0
                             self._centering_last_ts = time.time() * 1000
                             self.resume_preview(); self._resume_preview_after_snap = False
+                        except: self._centering_state = 0
 
                 elif tag == "toast":
                     print(f"[TOAST] {payload}")
