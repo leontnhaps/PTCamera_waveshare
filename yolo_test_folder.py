@@ -68,8 +68,8 @@ def predict_with_tiling(model, img, rows=2, cols=3, overlap=0.15, conf=0.25, iou
             for box in results.boxes:
                 # 로컬 좌표
                 x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                c = float(box.conf.cpu().numpy())
-                cls = int(box.cls.cpu().numpy())
+                c = float(box.conf.cpu().numpy().item())
+                cls = int(box.cls.cpu().numpy().item())
                 
                 # 글로벌 좌표로 변환
                 gx1 = x1 + tx1

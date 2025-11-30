@@ -5,9 +5,9 @@ import json, socket, struct, threading, queue, pathlib, io
 from datetime import datetime
 from tkinter import Tk, Label, Button, Scale, HORIZONTAL, IntVar, DoubleVar, Frame, Checkbutton, BooleanVar, filedialog, StringVar
 from tkinter import ttk
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageDraw
 import tkinter as tk  # ← 추가
-import os, re, csv   # ← 추가
+import os, re, csv, time   # ← 추가
 
 import numpy as np
 import cv2
@@ -31,6 +31,96 @@ except Exception:
     YOLO = None
     _YOLO_OK = False
 # =============================================
+
+# ==== [NEW] Tiling Helper Functions ====
+def non_max_suppression(boxes, scores, iou_threshold):
+    # OpenCV NMS 사용
+    if len(boxes) == 0:
+        return []
+    indices = cv2.dnn.NMSBoxes(boxes, scores, score_threshold=0.0, nms_threshold=iou_threshold)
+    if len(indices) > 0:
+        return indices.flatten()
+    return []
+
+def predict_with_tiling(model, img, rows=2, cols=3, overlap=0.15, conf=0.25, iou=0.45, device='cuda'):
+    """
+    이미지를 타일로 쪼개서 예측 후 결과 병합
+    rows, cols: 행/열 개수 (2x3 = 6등분)
+    overlap: 타일 간 겹치는 비율 (0.15 = 15%)
+    """
+    H, W = img.shape[:2]
+    
+    # 타일 크기 계산 (겹침 포함)
+    tile_h = int(H / rows)
+    tile_w = int(W / cols)
+    
+    # 겹침 크기
+    ov_h = int(tile_h * overlap)
+    ov_w = int(tile_w * overlap)
+    
+    # 실제 타일 크기 (겹침 포함)
+    step_h = tile_h - ov_h
+    step_w = tile_w - ov_w
+    
+    # 타일 좌표 생성
+    tiles = []
+    for y in range(0, H, step_h):
+        for x in range(0, W, step_w):
+            y2 = min(y + tile_h, H)
+            x2 = min(x + tile_w, W)
+            y1 = max(0, y2 - tile_h)
+            x1 = max(0, x2 - tile_w)
+            tiles.append((x1, y1, x2, y2))
+            if x2 >= W: break
+        if y2 >= H: break
+
+    # 모든 타일 추론
+    all_boxes = []   # [x, y, w, h]
+    all_scores = []
+    all_classes = []
+    
+    for i, (tx1, ty1, tx2, ty2) in enumerate(tiles):
+        tile_img = img[ty1:ty2, tx1:tx2]
+        
+        # YOLO 추론
+        results = model.predict(tile_img, conf=conf, iou=iou, device=device, verbose=False)[0]
+        
+        if results.boxes:
+            for box in results.boxes:
+                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                c = float(box.conf.cpu().numpy().item())
+                cls = int(box.cls.cpu().numpy().item())
+                
+                # 글로벌 좌표로 변환
+                gx1 = x1 + tx1
+                gy1 = y1 + ty1
+                gx2 = x2 + tx1
+                gy2 = y2 + ty1
+                
+                w = gx2 - gx1
+                h = gy2 - gy1
+                
+                all_boxes.append([int(gx1), int(gy1), int(w), int(h)])
+                all_scores.append(c)
+                all_classes.append(cls)
+
+    # 전체 결과에 대해 NMS 수행
+    if not all_boxes:
+        return [], [], []
+
+    indices = non_max_suppression(all_boxes, all_scores, iou_threshold=0.3)
+    
+    final_boxes = []
+    final_scores = []
+    final_classes = []
+    
+    for idx in indices:
+        final_boxes.append(all_boxes[idx])
+        final_scores.append(all_scores[idx])
+        final_classes.append(all_classes[idx])
+        
+    return final_boxes, final_scores, final_classes
+# =======================================
 
 SERVER_HOST = "127.0.0.1"
 GUI_CTRL_PORT = 7600
@@ -215,7 +305,7 @@ class App:
         self.tilt_min=IntVar(value=-30); self.tilt_max=IntVar(value=90);  self.tilt_step=IntVar(value=15)
         self.width=IntVar(value=2592);   self.height=IntVar(value=1944); self.quality=IntVar(value=90)
         self.speed=IntVar(value=100);    self.acc=DoubleVar(value=1.0);  self.settle=DoubleVar(value=0.6)
-        self.led_settle=DoubleVar(value=0.3)
+        self.led_settle=DoubleVar(value=0.4)
         self.hard_stop = BooleanVar(value=False)
 
         self._row(tab_scan, 0, "Pan min/max/step", self.pan_min, self.pan_max, self.pan_step)
@@ -355,6 +445,11 @@ class App:
         self._fits_v = {}
         # Pointing 탭에 추가 UI
         # centering state
+        self._centering_state = 0 # 0:IDLE, 1:WAIT_ON, 2:WAIT_OFF
+        self._centering_on_img = None
+        self._centering_off_img = None
+        self._centering_stable_cnt = 0
+        self._centering_last_ts = 0
         self._centering_ok_frames = 0
         self._centering_last_ms = 0
 
@@ -368,6 +463,10 @@ class App:
 
         Checkbutton(tab_point, text="Centering mode (live refine)", variable=self.centering_enable)\
             .grid(row=16, column=0, sticky="w")
+        
+        self.show_center_marker = BooleanVar(value=False)
+        Checkbutton(tab_point, text="Show Center Marker", variable=self.show_center_marker)\
+            .grid(row=16, column=3, sticky="w")
 
         Label(tab_point, text="px tol").grid(row=16, column=1, sticky="e")
         ttk.Entry(tab_point, width=6, textvariable=self.centering_px_tol).grid(row=16, column=2, sticky="w")
@@ -380,6 +479,10 @@ class App:
 
         Label(tab_point, text="stable frames").grid(row=17, column=3, sticky="e")
         ttk.Entry(tab_point, width=6, textvariable=self.centering_min_frames).grid(row=17, column=3, sticky="w")
+
+        # self.led_settle is defined in Scan tab section
+        Label(tab_point, text="LED settle(s)").grid(row=18, column=0, sticky="e")
+        ttk.Entry(tab_point, width=6, textvariable=self.led_settle).grid(row=18, column=1, sticky="w")
 
         for c in range(4):
             tab_point.grid_columnconfigure(c, weight=1)
@@ -613,7 +716,179 @@ class App:
         })
 
     # event loop
+    # ==== [NEW] Centering Mode Logic ====
+    def _start_centering_cycle(self):
+        # 1. LED ON
+        self._centering_state = 1 # WAIT_ON
+        self.ctrl.send({"cmd":"led", "value":255})
+        # Settle time wait -> Snap
+        wait_ms = int(self.led_settle.get() * 1000)
+        self.root.after(wait_ms, self._snap_center_on)
+
+    def _snap_center_on(self):
+        # 2. Snap ON image
+        # save="center_on.jpg"로 요청하여 _poll에서 식별
+        self.ctrl.send({
+            "cmd":"snap",
+            "width":  self.width.get(),
+            "height": self.height.get(),
+            "quality":self.quality.get(),
+            "save":   "center_on.jpg",
+            "hard_stop": False
+        })
+
+    def _snap_center_off(self):
+        # 4. Snap OFF image
+        self.ctrl.send({
+            "cmd":"snap",
+            "width":  self.width.get(),
+            "height": self.height.get(),
+            "quality":self.quality.get(),
+            "save":   "center_off.jpg",
+            "hard_stop": False
+        })
+
+    def _run_centering_logic(self, img_on, img_off):
+        """백그라운드 스레드에서 실행되는 Centering 핵심 로직"""
+        try:
+            # 1. Undistort
+            if self._ud_K is not None:
+                img_on = self._undistort_bgr(img_on)
+                img_off = self._undistort_bgr(img_off)
+            
+            # 2. Diff
+            diff = cv2.absdiff(img_on, img_off)
+            
+            # 3. YOLO (Tiling)
+            if not _YOLO_OK:
+                ui_q.put(("toast", "❌ YOLO 없음"))
+                return
+            
+            yolo_wpath = self.yolo_wpath.get().strip()
+            if not yolo_wpath:
+                ui_q.put(("toast", "⚠️ YOLO 가중치 없음"))
+                return
+                
+            # 모델 로드 (매번 로드하면 느리지만, 스레드 안전성을 위해.. 
+            # 혹은 self.yolo_model을 캐싱해서 써야 함. 여기서는 매번 로드하거나 캐싱 고려)
+            # 성능을 위해 전역/멤버 변수로 모델을 유지하는게 좋음.
+            # 하지만 간단히 하기 위해 여기서 로드 (또는 App에 캐싱된거 사용)
+            # App에 캐싱된게 없으므로 로드. (속도 문제시 개선 필요)
+            model = YOLO(yolo_wpath) 
+            device = "cuda" if (torch and torch.cuda.is_available()) else "cpu"
+            
+            # conf=0.20, iou=0.45
+            boxes, scores, classes = predict_with_tiling(
+                model, diff, rows=2, cols=3, overlap=0.15, 
+                conf=0.20, iou=0.45, device=device
+            )
+            
+            if not boxes:
+                ui_q.put(("toast", "[Center] 객체 없음"))
+                self._centering_stable_cnt = 0
+                return
+
+            # 4. 최고 conf 객체 찾기
+            best_idx = np.argmax(scores)
+            x, y, w, h = boxes[best_idx]
+            conf = scores[best_idx]
+            
+            # 중심 좌표
+            obj_cx = x + w / 2.0
+            obj_cy = y + h / 2.0
+            
+            # 5. 오차 계산
+            H, W = diff.shape[:2]
+            center_x, center_y = W / 2.0, H / 2.0
+            err_x = obj_cx - center_x
+            err_y = obj_cy - center_y
+            
+            ui_q.put(("toast", f"[Center] err=({err_x:.1f}, {err_y:.1f}) conf={conf:.2f}"))
+            
+            # 6. 안정성 판단
+            tol = self.centering_px_tol.get()
+            if abs(err_x) <= tol and abs(err_y) <= tol:
+                self._centering_stable_cnt += 1
+                ui_q.put(("toast", f"✅ 수렴 중... {self._centering_stable_cnt}/{self.centering_min_frames.get()}"))
+                
+                if self._centering_stable_cnt >= self.centering_min_frames.get():
+                    final_pan = round(self._curr_pan, 2)
+                    final_tilt = round(self._curr_tilt, 2)
+                    ui_q.put(("toast", f"🎉 Centering 완료! Final: (P={final_pan}, T={final_tilt})"))
+                    self.centering_enable.set(False) # 종료
+                    return
+            else:
+                self._centering_stable_cnt = 0
+                
+                # 7. 이동 (Move)
+                # 픽셀 오차 -> 각도 변환
+                # _fits_h, _fits_v 데이터가 있으면 사용, 없으면 대략적인 비례상수 사용
+                # 대략: 2592px ~= 60도? (FOV에 따라 다름)
+                # 일단 단순 비례 제어 (P-control)
+                # FOV가 약 60도라고 가정하면, 1px ~= 0.023도
+                # 하지만 정확히 하기 위해 fits 데이터가 있으면 좋음.
+                
+                # 여기서는 간단히 고정 게인 사용 (사용자가 max_step으로 제한하므로 안전)
+                # err_x > 0 이면 객체가 오른쪽에 있음 -> 카메라를 오른쪽(Pan +)으로 돌려야 함
+                # err_y > 0 이면 객체가 아래쪽에 있음 -> 카메라를 아래쪽(Tilt -)으로 돌려야 함 (Tilt 좌표계 확인 필요)
+                # 보통 Tilt +가 위쪽이면, 아래에 있는 객체를 보려면 Tilt를 줄여야 함.
+                
+                # 게인 (튜닝 필요)
+                k_pan = 0.02 
+                k_tilt = 0.02 
+                
+                d_pan = err_x * k_pan
+                d_tilt = -err_y * k_tilt # Tilt 방향 주의
+                
+                # Max step 제한
+                max_step = self.centering_max_step.get()
+                d_pan = max(min(d_pan, max_step), -max_step)
+                d_tilt = max(min(d_tilt, max_step), -max_step)
+                
+                # 현재 위치 추정 (명령 기준)
+                # self._curr_pan, self._curr_tilt 사용
+                next_pan = self._curr_pan + d_pan
+                next_tilt = self._curr_tilt + d_tilt
+                
+                # [NEW] Round to nearest integer (no accumulation)
+                # next_pan = float(round(next_pan))
+                # next_tilt = float(round(next_tilt))
+                
+                # Revert to accumulation (User request)
+                # self._curr_pan, self._curr_tilt are floats and accumulate small changes.
+                # Hardware will take the integer part when sending commands, but we keep the float state.
+                
+                # 범위 제한 (Centering Mode는 스캔 범위가 아닌 전체 하드웨어 범위를 사용해야 함)
+                # Hardware limits: Pan -180~180, Tilt -30~90 (Defaults)
+                next_pan = max(-180, min(180, next_pan))
+                next_tilt = max(-30, min(90, next_tilt))
+                
+                ui_q.put(("toast", f"→ Move: Cur({self._curr_pan:.2f}, {self._curr_tilt:.2f}) + d({d_pan:.2f}, {d_tilt:.2f}) -> Next({next_pan:.2f}, {next_tilt:.2f})"))
+
+                self._curr_pan = next_pan
+                self._curr_tilt = next_tilt
+                
+                self.ctrl.send({
+                    "cmd": "move",
+                    "pan": next_pan,
+                    "tilt": next_tilt,
+                    "speed": self.speed.get(),
+                    "acc": float(self.acc.get())
+                })
+                # ui_q.put(("toast", f"→ Adjust: dP={d_pan:.2f}, dT={d_tilt:.2f}"))
+
+        except Exception as e:
+            ui_q.put(("toast", f"❌ Centering Error: {e}"))
+            import traceback
+            traceback.print_exc()
+
     def _poll(self):
+        # [NEW] Centering Trigger Check
+        if self.centering_enable.get() and self._centering_state == 0:
+            now = time.time() * 1000
+            if now - self._centering_last_ts > self.centering_cooldown.get():
+                self._start_centering_cycle()
+
         try:
             while True:
                 tag, payload = ui_q.get_nowait()
@@ -626,178 +901,166 @@ class App:
                         total = int(evt.get("total",0))
                         self.prog.configure(maximum=max(1,total), value=0)
                         self.prog_lbl.config(text=f"0 / {total}"); self.dl_lbl.config(text="DL 0"); self.last_lbl.config(text="Last: -")
-
+                        
                         # === CSV 오픈 ===
-                        # 서버에서 session을 내려주면 쓰고, 없으면 타임스탬프
                         sess = evt.get("session") or datetime.now().strftime("scan_%Y%m%d_%H%M%S")
                         self._scan_csv_path = DEFAULT_OUT_DIR / f"{sess}_detections.csv"
                         try:
                             self._scan_csv_file = open(self._scan_csv_path, "w", newline="", encoding="utf-8")
                             self._scan_csv_writer = csv.writer(self._scan_csv_file)
-                            self._scan_csv_writer.writerow(["file","pan_deg","tilt_deg","cx","cy","w","h","conf","cls","W","H"])
+                            self._scan_csv_writer.writerow(["pan_deg","tilt_deg","cx","cy","w","h","conf","cls","W","H"])
                             print(f"[SCAN] CSV → {self._scan_csv_path}")
                         except Exception as e:
                             self._scan_csv_file = None
                             self._scan_csv_writer = None
                             ui_q.put(("toast", f"CSV 오픈 실패: {e}"))
 
-                    elif et == "start":
-                        total = int(evt.get("total",0))
-                        self.prog.configure(maximum=max(1,total), value=0)
-                        self.prog_lbl.config(text=f"0 / {total}"); self.dl_lbl.config(text="DL 0"); self.last_lbl.config(text="Last: -")
                     elif et == "progress":
                         done=int(evt.get("done",0)); total=int(evt.get("total",0))
+                        if total > 0: self.prog.configure(maximum=total)
                         self.prog.configure(value=done); self.prog_lbl.config(text=f"{done} / {total}")
                         name = evt.get("name","")
                         if name: self.last_lbl.config(text=f"Last: {name}")
                     elif et == "done":
-                        # === 스캔 완료 후 LED ON/OFF 차분 이미지 처리 + YOLO + CSV 저장 ===
                         ui_q.put(("toast", "[SCAN] 스캔 완료! LED ON/OFF 차분 이미지 처리 시작..."))
                         
-                        # 백그라운드 스레드에서 처리
                         def process_diff_and_yolo():
                             try:
                                 import glob
                                 from collections import defaultdict
-                                
-                                # 1. LED ON/OFF 이미지 그룹화
                                 led_on_files = sorted(glob.glob(str(DEFAULT_OUT_DIR / "*_led_on.jpg")))
                                 led_off_files = sorted(glob.glob(str(DEFAULT_OUT_DIR / "*_led_off.jpg")))
-                                
-                                # 파일명에서 pan/tilt 추출하여 매칭
                                 pairs = defaultdict(dict)
                                 fname_re = re.compile(r"img_t(?P<tilt>[+\-]\d{2,3})_p(?P<pan>[+\-]\d{2,3})_.*_led_(?P<state>on|off)\.jpg$", re.IGNORECASE)
-                                
                                 for fpath in led_on_files + led_off_files:
                                     fname = os.path.basename(fpath)
                                     m = fname_re.search(fname)
                                     if m:
-                                        pan = int(m.group("pan"))
-                                        tilt = int(m.group("tilt"))
-                                        state = m.group("state")
-                                        key = (pan, tilt)
-                                        pairs[key][state] = fpath
-                                
+                                        pairs[(int(m.group("pan")), int(m.group("tilt")))][m.group("state")] = fpath
                                 ui_q.put(("toast", f"[DIFF] {len(pairs)}개 위치의 LED ON/OFF 쌍 발견"))
                                 
                                 # 2. CSV 파일 생성
-                                sess = evt.get("session") or datetime.now().strftime("scan_%Y%m%d_%H%M%S")
-                                csv_path = DEFAULT_OUT_DIR / f"{sess}_detections.csv"
+                                # sess = evt.get("session") or datetime.now().strftime("scan_%Y%m%d_%H%M%S")
+                                # csv_path = DEFAULT_OUT_DIR / f"{sess}_detections.csv"
                                 
-                                with open(csv_path, "w", newline="", encoding="utf-8") as csvfile:
-                                    writer = csv.writer(csvfile)
-                                    writer.writerow(["pan_deg", "tilt_deg", "cx", "cy", "w", "h", "conf", "cls", "W", "H"])
-                                    
-                                    # 3. YOLO 모델 로드 (GPU 사용)
-                                    if not _YOLO_OK:
-                                        ui_q.put(("toast", "❌ YOLO가 설치되지 않았습니다 - CSV는 빈 파일로 저장됩니다"))
-                                        return
-                                    
-                                    yolo_wpath = self.yolo_wpath.get().strip()
-                                    if not yolo_wpath:
-                                        ui_q.put(("toast", "⚠️ YOLO 가중치 없음 - CSV는 빈 파일로 저장됩니다"))
-                                        return
-                                    
-                                    yolo_model = YOLO(yolo_wpath)
-                                    device = "cuda" if (torch and torch.cuda.is_available()) else "cpu"
-                                    ui_q.put(("toast", f"[YOLO] Using device: {device}"))
-                                    
-                                    # 4. 각 위치별로 차분 이미지 생성 + YOLO 실행
-                                    total_pairs = len(pairs)
-                                    processed = 0
-                                    detected_count = 0
-                                    
-                                    for (pan, tilt), files in sorted(pairs.items()):
-                                        if "on" not in files or "off" not in files:
-                                            continue  # ON/OFF 쌍이 없으면 스킵
-                                        
-                                        # LED ON/OFF 이미지 로드
-                                        img_on = cv2.imread(files["on"])
-                                        img_off = cv2.imread(files["off"])
-                                        
-                                        if img_on is None or img_off is None:
-                                            continue
-                                        
-                                        # ★★★ Calibration 적용 (반드시!) ★★★
-                                        if self._ud_K is not None and self._ud_D is not None:
-                                            img_on = self._undistort_bgr(img_on)
-                                            img_off = self._undistort_bgr(img_off)
-                                        else:
-                                            ui_q.put(("toast", "⚠️ Calibration 파라미터 없음 - 원본 이미지 사용"))
-                                        
-                                        # 차분 이미지 계산 (절대값)
-                                        diff = cv2.absdiff(img_on, img_off)
-                                        
-                                        H, W = diff.shape[:2]
-                                        
-                                        # YOLO 실행 (차분 이미지에 대해)
-                                        results = yolo_model.predict(
-                                            diff,
-                                            imgsz=self._scan_yolo_imgsz,
-                                            conf=self._scan_yolo_conf,
-                                            iou=0.45,
-                                            device=device,
-                                            verbose=False
-                                        )[0]
-                                        
-                                        # 검출 결과 CSV에 저장
-                                        if results.boxes is not None and len(results.boxes) > 0:
-                                            for b in results.boxes:
-                                                conf = float(b.conf.cpu().item() or 0.0)
-                                                if conf < self._scan_yolo_conf:
-                                                    continue
-                                                cls = int(b.cls.cpu().item() or -1)
-                                                x1, y1, x2, y2 = b.xyxy[0].cpu().numpy().tolist()
-                                                cx = 0.5 * (x1 + x2)
-                                                cy = 0.5 * (y1 + y2)
-                                                writer.writerow([pan, tilt, cx, cy, x2-x1, y2-y1, conf, cls, W, H])
-                                                detected_count += 1
-                                        
-                                        processed += 1
-                                        if processed % 10 == 0:
-                                            ui_q.put(("toast", f"[DIFF+YOLO] 처리 중... {processed}/{total_pairs} (검출: {detected_count})"))
+                                # 이미 _poll 시작 부분에서 생성된 self._scan_csv_file 사용
+                                if self._scan_csv_file is None:
+                                     sess = evt.get("session") or datetime.now().strftime("scan_%Y%m%d_%H%M%S")
+                                     csv_path = DEFAULT_OUT_DIR / f"{sess}_detections.csv"
+                                     # ... (open logic if needed, but usually opened at 'start')
+                                else:
+                                     csv_path = self._scan_csv_path
+
+                                # 만약 'start' 이벤트에서 열린 파일이 있다면 닫고 새로 열거나, 이어서 쓰거나.
+                                # 기존 로직: 'start'에서 열고 헤더 씀.
+                                # 여기서 또 열면 2개가 되거나 덮어씀.
+                                # 'start'에서 만든 파일에 이어서 쓰는게 맞음.
                                 
-                                ui_q.put(("toast", f"✅ CSV 저장 완료: {csv_path} (총 {detected_count}개 검출)"))
+                                # 하지만 여기서 'with open'으로 새로 열고 있음 -> 이게 문제.
+                                # self._scan_csv_writer를 사용해야 함.
                                 
+                                writer = self._scan_csv_writer
+                                if writer is None:
+                                    # fallback
+                                    f = open(csv_path, "a", newline="", encoding="utf-8")
+                                    writer = csv.writer(f)
+                                
+                                # 3. YOLO 모델 로드 (GPU 사용)
+                                if not _YOLO_OK:
+                                    ui_q.put(("toast", "❌ YOLO 미설치"))
+                                    return
+                                yolo_wpath = self.yolo_wpath.get().strip()
+                                if not yolo_wpath:
+                                    ui_q.put(("toast", "⚠️ YOLO 가중치 없음"))
+                                    return
+                                yolo_model = YOLO(yolo_wpath)
+                                device = "cuda" if (torch and torch.cuda.is_available()) else "cpu"
+                                ui_q.put(("toast", f"[YOLO] Device: {device}"))
+                                total_pairs = len(pairs); processed = 0; detected_count = 0
+                                for (pan, tilt), files in sorted(pairs.items()):
+                                    if "on" not in files or "off" not in files: continue
+                                    img_on = cv2.imread(files["on"])
+                                    img_off = cv2.imread(files["off"])
+                                    if img_on is None or img_off is None: continue
+                                    if self._ud_K is not None:
+                                        img_on = self._undistort_bgr(img_on)
+                                        img_off = self._undistort_bgr(img_off)
+                                    diff = cv2.absdiff(img_on, img_off)
+                                    H, W = diff.shape[:2]
+                                    boxes, scores, classes = predict_with_tiling(yolo_model, diff, rows=2, cols=3, overlap=0.15, conf=0.20, iou=0.45, device=device)
+                                    if boxes:
+                                        for i, (x, y, w, h) in enumerate(boxes):
+                                            writer.writerow([pan, tilt, x+w/2, y+h/2, w, h, float(scores[i]), int(classes[i]), W, H])
+                                            detected_count += 1
+                                    processed += 1
+                                    # [NEW] Update progress bar
+                                    ui_q.put(("evt", {"event": "progress", "done": processed, "total": total_pairs, "name": f"YOLO {processed}/{total_pairs}"}))
+                                    if processed % 10 == 0: ui_q.put(("toast", f"[DIFF] {processed}/{total_pairs}"))
+                                
+                                # [NEW] Flush and close CSV
+                                if self._scan_csv_file:
+                                    self._scan_csv_file.flush()
+                                    self._scan_csv_file.close()
+                                    self._scan_csv_file = None
+                                    self._scan_csv_writer = None
+                                    
+                                ui_q.put(("toast", f"✅ 완료: {csv_path} ({detected_count}개)"))
                             except Exception as e:
-                                ui_q.put(("toast", f"❌ 차분 처리 실패: {e}"))
-                                import traceback
-                                traceback.print_exc()
-                        
-                        # 백그라운드 스레드 시작
+                                ui_q.put(("toast", f"❌ 에러: {e}"))
+                                import traceback; traceback.print_exc()
                         threading.Thread(target=process_diff_and_yolo, daemon=True).start()
-                        
-                        # 프리뷰 재개
-                        if self.preview_enable.get():
-                            self.toggle_preview()
 
                 elif tag == "preview":
                     self._set_preview(payload)
+
                 elif tag == "saved":
                     name, data = payload
-                    self.dl_lbl.config(text=f"DL {int(self.dl_lbl.cget('text').split()[-1])+1}")
-                    self.last_lbl.config(text=f"Last: {name}")
-                    self._set_preview(data)
-
-                    if self.ud_save_copy.get() and self._ud_K is not None:
+                    if name == "center_on.jpg" and self._centering_state == 1:
                         try:
-                            arr = np.frombuffer(data, np.uint8)
-                            bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                            if bgr is not None:
-                                ubgr = self._undistort_bgr(bgr)
-                                stem, dot, ext = name.partition(".")
-                                out = DEFAULT_OUT_DIR / f"{stem}_ud.{ext or 'jpg'}"
-                                cv2.imwrite(str(out), ubgr)
-                        except Exception as e:
-                            print("[save_ud] err:", e)
-                    # === CSV/YOLO 기록 제거됨 ===
+                            nparr = np.frombuffer(data, np.uint8)
+                            self._centering_on_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                            self._set_preview(data) # [NEW] Show captured image
+                            self._centering_state = 2
+                            self.ctrl.send({"cmd":"led", "value":0})
+                            self.root.after(int(self.led_settle.get()*1000), self._snap_center_off)
+                        except: self._centering_state = 0
+                    elif name == "center_off.jpg" and self._centering_state == 2:
+                        try:
+                            nparr = np.frombuffer(data, np.uint8)
+                            self._centering_off_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                            self._set_preview(data) # [NEW] Show captured image
+                            self._centering_state = 0
+                            self._centering_last_ts = time.time() * 1000
+                            if self._centering_on_img is not None and self._centering_off_img is not None:
+                                threading.Thread(target=self._run_centering_logic, args=(self._centering_on_img, self._centering_off_img), daemon=True).start()
+                        except: self._centering_state = 0
+                    else:
+                        self.dl_lbl.config(text=f"DL {len(data)}")
+                        # [NEW] Show scanned image in preview
+                        self._set_preview(data)
+                        
+                        # [RESTORED] Save undistorted copy if enabled
+                        if self.ud_save_copy.get() and self._ud_K is not None:
+                             try:
+                                 nparr = np.frombuffer(data, np.uint8)
+                                 bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                                 if bgr is not None:
+                                     ud = self._undistort_bgr(bgr)
+                                     # name is like "img_t..._p..._....jpg"
+                                     # save as "img_t..._p..._....ud.jpg"
+                                     base, ext = os.path.splitext(name)
+                                     ud_name = f"{base}.ud{ext}"
+                                     ud_path = DEFAULT_OUT_DIR / ud_name
+                                     cv2.imwrite(str(ud_path), ud)
+                             except Exception as e:
+                                 print(f"[UD Save] Error: {e}")
 
-                    if self._resume_preview_after_snap:
-                        self._resume_preview_after_snap = False
-                        self.resume_preview()
+                        if self._resume_preview_after_snap:
+                            self.resume_preview(); self._resume_preview_after_snap = False
 
                 elif tag == "toast":
-                    print(payload)
+                    print(f"[TOAST] {payload}")
+
         except queue.Empty:
             pass
         self.root.after(60, self._poll)
@@ -808,6 +1071,18 @@ class App:
         iw, ih = pil_image.size
         if iw <= 0 or ih <= 0 or W <= 0 or H <= 0:
             return
+        
+        # [NEW] Centering Mode Marker
+        if self.centering_enable.get() or self.show_center_marker.get():
+            draw = ImageDraw.Draw(pil_image)
+            cx, cy = iw / 2, ih / 2
+            r = 5
+            # Red circle
+            draw.ellipse((cx-r, cy-r, cx+r, cy+r), outline="red", width=2)
+            # Crosshair
+            draw.line((cx-10, cy, cx+10, cy), fill="red", width=2)
+            draw.line((cx, cy-10, cx, cy+10), fill="red", width=2)
+
         scale = min(W / iw, H / ih)
         nw = max(1, int(round(iw * scale)))
         nh = max(1, int(round(ih * scale)))
