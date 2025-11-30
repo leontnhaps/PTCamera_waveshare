@@ -344,10 +344,15 @@ def main():
     GPIO.cleanup()
     print("[GPIO] Cleanup done")
 
-if __name__ == "__main__":
+    # [NEW] Laser Init (Force OFF)
+    GPIO.setup(LASER_PIN, GPIO.OUT, initial=GPIO.LOW)
+    print("[LASER] Initialized to OFF")
+
     try:
         main()
     except KeyboardInterrupt:
         print("\n[MAIN] Interrupted by user")
+    finally:
+        GPIO.output(LASER_PIN, GPIO.LOW)
         GPIO.cleanup()
-        print("[GPIO] Cleanup done")
+        print("[GPIO] Cleanup done (Laser OFF)")

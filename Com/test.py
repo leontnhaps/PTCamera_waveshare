@@ -325,37 +325,6 @@ class App:
         self.prog = ttk.Progressbar(ops, orient=HORIZONTAL, length=280, mode="determinate"); self.prog.pack(side="left", padx=10)
         self.prog_lbl = Label(ops, text="0 / 0"); self.prog_lbl.pack(side="left")
         self.last_lbl = Label(ops, text="Last: -"); self.last_lbl.pack(side="left", padx=10)
-        self.dl_lbl = Label(ops, text="DL 0"); self.dl_lbl.pack(side="left")
-
-        # ---- Pointing tab (CSV → 가중평균 타깃 → Move) ----
-        self.point_csv_path = StringVar(value="")
-        self.point_conf_min = DoubleVar(value=0.50)  # CSV 필터용
-        self.point_min_samples = IntVar(value=2)     # 각 선형피팅 최소 샘플 수
-        self.point_pan_target  = DoubleVar(value=0.0)
-        self.point_tilt_target = DoubleVar(value=0.0)
-        self.point_speed  = IntVar(value=self.speed.get())  # Scan 속도 기본 재사용
-        self.point_acc    = DoubleVar(value=self.acc.get())
-
-        Label(tab_point, text="CSV 경로").grid(row=0, column=0, sticky="w", padx=4, pady=4)
-        ttk.Entry(tab_point, width=52, textvariable=self.point_csv_path)\
-            .grid(row=0, column=1, columnspan=2, sticky="we", padx=4)
-        Button(tab_point, text="CSV 열기", command=self.pointing_choose_csv)\
-            .grid(row=0, column=3, sticky="e", padx=4)
-
-        Label(tab_point, text="conf≥").grid(row=1, column=0, sticky="e")
-        ttk.Entry(tab_point, width=8, textvariable=self.point_conf_min).grid(row=1, column=1, sticky="w")
-        Label(tab_point, text="min samples/fit").grid(row=1, column=2, sticky="e")
-        ttk.Entry(tab_point, width=8, textvariable=self.point_min_samples).grid(row=1, column=3, sticky="w")
-
-        Button(tab_point, text="가중평균 계산", command=self.pointing_compute)\
-            .grid(row=2, column=0, sticky="w", padx=4, pady=6)
-
-        Label(tab_point, text="pan target (deg)").grid(row=3, column=0, sticky="e")
-        ttk.Entry(tab_point, width=10, textvariable=self.point_pan_target, state="readonly")\
-            .grid(row=3, column=1, sticky="w")
-        Label(tab_point, text="tilt target (deg)").grid(row=3, column=2, sticky="e")
-        ttk.Entry(tab_point, width=10, textvariable=self.point_tilt_target, state="readonly")\
-            .grid(row=3, column=3, sticky="w")
 
         Label(tab_point, text="Speed").grid(row=4, column=0, sticky="e")
         ttk.Entry(tab_point, width=8, textvariable=self.point_speed).grid(row=4, column=1, sticky="w")
@@ -479,32 +448,71 @@ class App:
         Checkbutton(tab_point, text="Show Center Marker", variable=self.show_center_marker)\
             .grid(row=16, column=3, sticky="w")
 
-        Label(tab_point, text="px tol").grid(row=16, column=1, sticky="e")
-        ttk.Entry(tab_point, width=6, textvariable=self.centering_px_tol).grid(row=16, column=2, sticky="w")
-
-        Label(tab_point, text="max step(°)").grid(row=17, column=1, sticky="e")
-        ttk.Entry(tab_point, width=6, textvariable=self.centering_max_step).grid(row=17, column=2, sticky="w")
-
-        Label(tab_point, text="cooldown(ms)").grid(row=17, column=0, sticky="e")
-        ttk.Entry(tab_point, width=8, textvariable=self.centering_cooldown).grid(row=17, column=1, sticky="w")
-
-        Label(tab_point, text="stable frames").grid(row=17, column=3, sticky="e")
-        ttk.Entry(tab_point, width=6, textvariable=self.centering_min_frames).grid(row=17, column=3, sticky="w")
-
-        # self.led_settle is defined in Scan tab section
-        Label(tab_point, text="LED settle(s)").grid(row=18, column=0, sticky="e")
-        ttk.Entry(tab_point, width=6, textvariable=self.led_settle).grid(row=18, column=1, sticky="w")
-
-        ttk.Separator(tab_point, orient="horizontal").grid(row=19, column=0, columnspan=4, sticky="ew", pady=(8,6))
-
-        self.pointing_enable = BooleanVar(value=False)
-        self.pointing_roi_size = IntVar(value=200)
+        # ---------------------------------------------------------------------
+        # 4. Pointing Tab (Scrollable)
+        # ---------------------------------------------------------------------
+        self.tab_point = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_point, text="Pointing")
         
-        Checkbutton(tab_point, text="Pointing Mode (Laser Target)", variable=self.pointing_enable, command=self.on_pointing_toggle)\
-            .grid(row=20, column=0, sticky="w")
-            
-        Label(tab_point, text="Laser ROI").grid(row=20, column=1, sticky="e")
-        ttk.Entry(tab_point, width=6, textvariable=self.pointing_roi_size).grid(row=20, column=2, sticky="w")
+        # Create Canvas & Scrollbar
+        self.point_canvas = tk.Canvas(self.tab_point)
+        self.point_scroll = ttk.Scrollbar(self.tab_point, orient="vertical", command=self.point_canvas.yview)
+        self.point_scroll_frame = ttk.Frame(self.point_canvas)
+        
+        self.point_scroll_frame.bind(
+            "<Configure>",
+            lambda e: self.point_canvas.configure(scrollregion=self.point_canvas.bbox("all"))
+        )
+        self.point_canvas.create_window((0, 0), window=self.point_scroll_frame, anchor="nw")
+        self.point_canvas.configure(yscrollcommand=self.point_scroll.set)
+        
+        self.point_canvas.pack(side="left", fill="both", expand=True)
+        self.point_scroll.pack(side="right", fill="y")
+        
+        # --- Pointing Mode Controls (Inside Scroll Frame) ---
+        point_ctrl_frame = ttk.LabelFrame(self.point_scroll_frame, text="Pointing Control")
+        point_ctrl_frame.pack(padx=10, pady=10, fill="x")
+        
+        self.pointing_enable = tk.BooleanVar(value=False)
+        ttk.Checkbutton(point_ctrl_frame, text="Enable Pointing Mode", variable=self.pointing_enable, command=self.on_pointing_toggle).pack(anchor="w", padx=5, pady=5)
+        
+        # Pointing Settings (Editable)
+        point_set_frame = ttk.LabelFrame(self.point_scroll_frame, text="Pointing Settings")
+        point_set_frame.pack(padx=10, pady=10, fill="x")
+        
+        def add_entry(parent, label, var, row):
+            ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=5, pady=2)
+            ttk.Entry(parent, textvariable=var, width=10).grid(row=row, column=1, sticky="w", padx=5, pady=2)
+
+        self.pointing_roi_size = tk.IntVar(value=200)
+        add_entry(point_set_frame, "Laser ROI Size (px):", self.pointing_roi_size, 0)
+        
+        ttk.Label(point_set_frame, text="--- Shared Settings ---").grid(row=1, column=0, columnspan=2, pady=5)
+        add_entry(point_set_frame, "Tolerance (px):", self.centering_px_tol, 2)
+        add_entry(point_set_frame, "Min Stable Frames:", self.centering_min_frames, 3)
+        add_entry(point_set_frame, "Max Step (deg):", self.centering_max_step, 4)
+        add_entry(point_set_frame, "Cooldown (ms):", self.centering_cooldown, 5)
+        add_entry(point_set_frame, "LED Settle (s):", self.led_settle, 6)
+
+        # CSV Analysis (Existing)
+        point_csv_frame = ttk.LabelFrame(self.point_scroll_frame, text="CSV Analysis (Legacy)")
+        point_csv_frame.pack(padx=10, pady=10, fill="x")
+        
+        ttk.Button(point_csv_frame, text="Select CSV", command=self.pointing_choose_csv).pack(anchor="w", padx=5, pady=2)
+        self.point_csv_path = tk.StringVar()
+        ttk.Label(point_csv_frame, textvariable=self.point_csv_path, wraplength=300).pack(anchor="w", padx=5, pady=2)
+        
+        ttk.Label(point_csv_frame, text="Conf Min:").pack(anchor="w", padx=5)
+        self.point_conf_min = tk.StringVar(value="0.5")
+        ttk.Entry(point_csv_frame, textvariable=self.point_conf_min, width=10).pack(anchor="w", padx=5)
+        
+        ttk.Label(point_csv_frame, text="Min Samples:").pack(anchor="w", padx=5)
+        self.point_min_samples = tk.StringVar(value="5")
+        ttk.Entry(point_csv_frame, textvariable=self.point_min_samples, width=10).pack(anchor="w", padx=5)
+        
+        ttk.Button(point_csv_frame, text="Compute Target", command=self.pointing_compute).pack(anchor="w", padx=5, pady=5)
+        self.point_result_lbl = ttk.Label(point_csv_frame, text="Result: -")
+        self.point_result_lbl.pack(anchor="w", padx=5, pady=5)
 
         for c in range(4):
             tab_point.grid_columnconfigure(c, weight=1)
@@ -1267,6 +1275,152 @@ class App:
                             self._centering_last_ts = time.time() * 1000
                             self.resume_preview(); self._resume_preview_after_snap = False
                         except: self._centering_state = 0
+
+                    # [NEW] Pointing Mode Handlers
+                    elif name == "pointing_laser_on.jpg":
+                        self._pointing_state = 2 # WAIT_LASER_OFF
+                        self.ctrl.send({"cmd":"laser", "value":0})
+                        wait_ms = int(self.led_settle.get() * 1000)
+                        self.root.after(wait_ms, lambda: self.ctrl.send({
+                            "cmd":"snap", "width":self.width.get(), "height":self.height.get(),
+                            "quality":self.quality.get(), "save":"pointing_laser_off.jpg", "hard_stop":False
+                        }))
+                        
+                    elif name == "pointing_laser_off.jpg":
+                        self._pointing_state = 3 # PROCESSING_LASER
+                        path_on = DEFAULT_OUT_DIR / "pointing_laser_on.jpg"
+                        path_off = DEFAULT_OUT_DIR / "pointing_laser_off.jpg"
+                        try:
+                            nparr_on = np.fromfile(path_on, np.uint8)
+                            img_on = cv2.imdecode(nparr_on, cv2.IMREAD_COLOR)
+                            nparr_off = np.fromfile(path_off, np.uint8)
+                            img_off = cv2.imdecode(nparr_off, cv2.IMREAD_COLOR)
+                            if img_on is not None and img_off is not None:
+                                threading.Thread(target=self._run_pointing_laser_logic, args=(img_on, img_off), daemon=True).start()
+                        except Exception as e:
+                            print(f"[Pointing] Laser Load Error: {e}")
+                            self._pointing_state = 0
+
+                    elif name == "pointing_led_on.jpg":
+                        self._pointing_state = 5 # WAIT_LED_OFF
+                        self.ctrl.send({"cmd":"led", "value":0})
+                        wait_ms = int(self.led_settle.get() * 1000)
+                        self.root.after(wait_ms, lambda: self.ctrl.send({
+                            "cmd":"snap", "width":self.width.get(), "height":self.height.get(),
+                            "quality":self.quality.get(), "save":"pointing_led_off.jpg", "hard_stop":False
+                        }))
+
+                    elif name == "pointing_led_off.jpg":
+                        self._pointing_state = 6 # PROCESSING_OBJECT
+                        path_on = DEFAULT_OUT_DIR / "pointing_led_on.jpg"
+                        path_off = DEFAULT_OUT_DIR / "pointing_led_off.jpg"
+                        try:
+                            nparr_on = np.fromfile(path_on, np.uint8)
+                            img_on = cv2.imdecode(nparr_on, cv2.IMREAD_COLOR)
+                            nparr_off = np.fromfile(path_off, np.uint8)
+                            img_off = cv2.imdecode(nparr_off, cv2.IMREAD_COLOR)
+                            if img_on is not None and img_off is not None:
+                                threading.Thread(target=self._run_pointing_object_logic, args=(img_on, img_off), daemon=True).start()
+                        except Exception as e:
+                            print(f"[Pointing] Object Load Error: {e}")
+                            self._pointing_state = 0
+
+                    else:
+                        self.dl_lbl.config(text=f"DL {len(data)}")
+                        # [NEW] Show scanned image in preview
+                        self._set_preview(data)
+                        
+                        # [RESTORED] Save undistorted copy if enabled
+                        if self.ud_save_copy.get() and self._ud_K is not None:
+                             try:
+                                 nparr = np.frombuffer(data, np.uint8)
+                                 bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                                 if bgr is not None:
+                                     ud = self._undistort_bgr(bgr)
+                                     # name is like "img_t..._p..._....jpg"
+                                     # save as "img_t..._p..._....ud.jpg"
+                                     base, ext = os.path.splitext(name)
+                                     ud_name = f"{base}.ud{ext}"
+                                     ud_path = DEFAULT_OUT_DIR / ud_name
+                                     cv2.imwrite(str(ud_path), ud)
+                             except Exception as e:
+                                 print(f"[UD Save] Error: {e}")
+
+                        if self._resume_preview_after_snap:
+                            self.resume_preview(); self._resume_preview_after_snap = False
+
+                    # [NEW] Pointing Mode Handlers
+                    elif name == "pointing_laser_on.jpg":
+                        self._pointing_state = 2 # WAIT_LASER_OFF
+                        self.ctrl.send({"cmd":"laser", "value":0})
+                        wait_ms = int(self.led_settle.get() * 1000)
+                        self.root.after(wait_ms, lambda: self.ctrl.send({
+                            "cmd":"snap", "width":self.width.get(), "height":self.height.get(),
+                            "quality":self.quality.get(), "save":"pointing_laser_off.jpg", "hard_stop":False
+                        }))
+                        
+                    elif name == "pointing_laser_off.jpg":
+                        self._pointing_state = 3 # PROCESSING_LASER
+                        path_on = DEFAULT_OUT_DIR / "pointing_laser_on.jpg"
+                        path_off = DEFAULT_OUT_DIR / "pointing_laser_off.jpg"
+                        try:
+                            nparr_on = np.fromfile(path_on, np.uint8)
+                            img_on = cv2.imdecode(nparr_on, cv2.IMREAD_COLOR)
+                            nparr_off = np.fromfile(path_off, np.uint8)
+                            img_off = cv2.imdecode(nparr_off, cv2.IMREAD_COLOR)
+                            if img_on is not None and img_off is not None:
+                                threading.Thread(target=self._run_pointing_laser_logic, args=(img_on, img_off), daemon=True).start()
+                        except Exception as e:
+                            print(f"[Pointing] Laser Load Error: {e}")
+                            self._pointing_state = 0
+
+                    elif name == "pointing_led_on.jpg":
+                        self._pointing_state = 5 # WAIT_LED_OFF
+                        self.ctrl.send({"cmd":"led", "value":0})
+                        wait_ms = int(self.led_settle.get() * 1000)
+                        self.root.after(wait_ms, lambda: self.ctrl.send({
+                            "cmd":"snap", "width":self.width.get(), "height":self.height.get(),
+                            "quality":self.quality.get(), "save":"pointing_led_off.jpg", "hard_stop":False
+                        }))
+
+                    elif name == "pointing_led_off.jpg":
+                        self._pointing_state = 6 # PROCESSING_OBJECT
+                        path_on = DEFAULT_OUT_DIR / "pointing_led_on.jpg"
+                        path_off = DEFAULT_OUT_DIR / "pointing_led_off.jpg"
+                        try:
+                            nparr_on = np.fromfile(path_on, np.uint8)
+                            img_on = cv2.imdecode(nparr_on, cv2.IMREAD_COLOR)
+                            nparr_off = np.fromfile(path_off, np.uint8)
+                            img_off = cv2.imdecode(nparr_off, cv2.IMREAD_COLOR)
+                            if img_on is not None and img_off is not None:
+                                threading.Thread(target=self._run_pointing_object_logic, args=(img_on, img_off), daemon=True).start()
+                        except Exception as e:
+                            print(f"[Pointing] Object Load Error: {e}")
+                            self._pointing_state = 0
+
+                    else:
+                        self.dl_lbl.config(text=f"DL {len(data)}")
+                        # [NEW] Show scanned image in preview
+                        self._set_preview(data)
+                        
+                        # [RESTORED] Save undistorted copy if enabled
+                        if self.ud_save_copy.get() and self._ud_K is not None:
+                             try:
+                                 nparr = np.frombuffer(data, np.uint8)
+                                 bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                                 if bgr is not None:
+                                     ud = self._undistort_bgr(bgr)
+                                     # name is like "img_t..._p..._....jpg"
+                                     # save as "img_t..._p..._....ud.jpg"
+                                     base, ext = os.path.splitext(name)
+                                     ud_name = f"{base}.ud{ext}"
+                                     ud_path = DEFAULT_OUT_DIR / ud_name
+                                     cv2.imwrite(str(ud_path), ud)
+                             except Exception as e:
+                                 print(f"[UD Save] Error: {e}")
+
+                        if self._resume_preview_after_snap:
+                            self.resume_preview(); self._resume_preview_after_snap = False
 
                 elif tag == "toast":
                     print(f"[TOAST] {payload}")
