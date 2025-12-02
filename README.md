@@ -34,37 +34,41 @@ OpenCV와 YOLO를 활용한 자동 타겟팅 및 레이저 포인팅 시스템
 - 🎯 **정밀 타겟팅**: CSV 데이터 기반 선형 피팅 알고리즘
 - 🔧 **왜곡 보정**: 카메라 캘리브레이션 및 실시간 보정
 - ⚡ **GPU 가속**: CUDA 지원으로 성능 최적화
+- 🔄 **자동 시퀀스**: 스캔부터 타겟팅까지 원클릭 자동화
 
 ---
 
 ## ✨ 주요 기능
 
-### 1. **스캔 모드 (Scan)**
+### 1. **Auto Sequence (자동 시퀀스)**
+- **One-Click Operation**: 버튼 하나로 전체 프로세스 실행
+- **Workflow**: Scan → Compute Target → Move → Centering → Pointing
+- 각 단계별 자동 전환 및 에러 처리
+
+### 2. **스캔 모드 (Scan)**
 - 지정된 각도 범위를 자동으로 스캔하여 이미지 수집
 - YOLO 결과를 CSV로 자동 로깅 (pan/tilt 각도, 좌표, confidence)
 - 스캔 중 흔들림 제어 (Accel, Settle 파라미터 조정)
 
-### 2. **수동 제어 (Manual/LED)**
-- Pan/Tilt 각도 직접 조정
-- LED 밝기 제어
-- 속도 및 가속도 설정
+### 3. **Pointing Mode (정밀 타겟팅)**
+- **SAHI (Slicing Aided Hyper Inference) 기법 적용**:
+    - 고해상도 이미지를 6등분(2x3) 타일링하여 YOLO 추론
+    - 작은 객체(Small Object) 인식률 대폭 향상
+- **레이저 트래킹**:
+    - LED ON/OFF 차분(Diff) 이미지 분석
+    - ROI, GaussianBlur, Threshold, FindContours 기법 활용
+    - 레이저 포인트 자동 감지 및 타겟 정렬
 
-### 3. **프리뷰 & 설정 (Preview & Settings)**
+### 4. **Centering Mode (중앙 정렬)**
+- YOLO Centroid 기반 실시간 피드백 제어
+- 목표 객체를 화면 중앙에 유지하도록 Pan/Tilt 미세 조정
+
+### 5. **프리뷰 & 설정 (Preview & Settings)**
 - 실시간 라이브 프리뷰
 - 해상도 조정 (640x360 ~ 2592x1944)
 - FPS 및 품질 설정
 - 왜곡 보정 적용/해제
 - Alpha/Balance 파라미터 조정
-
-### 4. **Pointing (자동 타겟팅)**
-- 스캔 CSV 데이터 기반 선형 피팅
-- 가중 평균으로 타겟 각도 계산
-- 실시간 센터링 (YOLO centroid 기반)
-
-### 5. **하드웨어 테스트 (GPIO.py)**
-- Raspberry Pi GPIO 핀 제어
-- ESP32와 통신하여 LED 제어
-- 1초 주기 HIGH/LOW 신호 테스트
 
 ---
 
@@ -78,6 +82,7 @@ OpenCV와 YOLO를 활용한 자동 타겟팅 및 레이저 포인팅 시스템
 │ • Tkinter UI    │                                 │ • 제어 중계      │
 │ • YOLO 처리     │                                 │ • 이미지 중계    │
 │ • 왜곡 보정     │                                 │                  │
+│ • Auto Sequence │                                 │                  │
 └─────────────────┘                                 └──────────────────┘
                                                              │
                                                              │ Socket
@@ -138,9 +143,9 @@ pip install numpy pillow
 pip install ultralytics  # YOLO
 pip install torch torchvision  # GPU 가속용 (선택)
 
-# 4. 리팩토링된 GUI 실행
-cd Refactoring
-python Com_main.py
+# 4. GUI 실행
+cd Com
+python auto_sequence.py
 ```
 
 ### Raspberry Pi 에이전트 설치
@@ -182,44 +187,26 @@ cd Raspberrypi
 python3 test.py
 
 # 3단계: GUI 클라이언트 시작
-cd Refactoring
-python Com_main.py
+cd Com
+python auto_sequence.py
 ```
 
-### 2. 스캔 및 타겟팅 프로세스
+### 2. Auto Sequence (자동 모드)
 
-1. **카메라 보정 파일 로드**
-   - `Preview & Settings` 탭에서 `Load calib.npz` 클릭
+1. **준비**: `Load calib.npz` 및 `Load YOLO` 완료
+2. **실행**: `Auto Sequence` 탭의 `START AUTO SEQUENCE` 버튼 클릭
+3. **동작**:
+    - **Scan**: 전체 영역 스캔 및 CSV 저장
+    - **Compute**: 타겟 위치 계산
+    - **Move**: 타겟 위치로 이동
+    - **Centering**: 정밀 중앙 정렬
+    - **Pointing**: 레이저 ON/OFF 및 타겟 조준
 
-2. **YOLO 모델 로드**
-   - `Load YOLO Weights (.pt)` 버튼 클릭
-   - 또는 `config.py`에서 자동 로드 설정
+### 3. 수동 제어 및 테스트
 
-3. **스캔 실행**
-   - `Scan` 탭에서 Pan/Tilt 범위 및 Step 설정
-   - `Start Scan` 클릭
-   - 자동으로 CSV 로깅 시작
-
-4. **Pointing 계산**
-   - `Pointing` 탭에서 `Select CSV` 버튼으로 스캔 CSV 선택
-   - `가중평균 계산` 클릭 → 타겟 각도 계산
-   - `Move to Target` 클릭 → 카메라 이동
-
-5. **센터링 (선택)**
-   - `Centering Enable` 체크
-   - YOLO centroid 기반 실시간 미세 조정
-
-### 3. GPIO 테스트 (하드웨어 검증)
-
-```bash
-# Raspberry Pi에서 실행
-python3 GPIO.py
-
-# 예상 출력:
-# Signal: HIGH (LED ON)
-# Signal: LOW (LED OFF)
-# (1초 주기 반복)
-```
+- **Manual Tab**: Pan/Tilt 직접 제어, LED/Laser ON/OFF
+- **Preview Tab**: 실시간 화면 확인, 왜곡 보정 설정
+- **ERTest.py**: 이미지 처리 알고리즘(Diff, Threshold 등) 단위 테스트
 
 ---
 
@@ -227,23 +214,10 @@ python3 GPIO.py
 
 ```
 PTCamera_waveshare/
-├── 📁 Refactoring/              ✨ 리팩토링된 코드 (권장)
-│   ├── Com_main.py              # GUI 메인 파일
-│   ├── config.py                # 설정 중앙화
-│   ├── network.py               # 네트워크 클라이언트
-│   ├── gui_panels.py            # UI 패널
-│   ├── processors/              # 이미지 처리 모듈
-│   │   ├── undistort_processor.py
-│   │   └── yolo_processor.py
-│   ├── controllers/             # 비즈니스 로직
-│   │   ├── pointing_controller.py
-│   │   ├── scan_controller.py
-│   │   └── centering_controller.py
-│   └── utils/                   # 유틸리티
-│       └── geometry.py
-│
-├── 📁 Com/                      # 레거시 GUI (백업용)
-│   └── test.py
+├── 📁 Com/                      # 메인 GUI 클라이언트
+│   ├── auto_sequence.py         # ✨ 통합 자동화 스크립트 (메인)
+│   ├── Com_main.py              # 레거시 GUI
+│   └── test.py                  # 테스트용 GUI
 │
 ├── 📁 Server/                   # 중계 서버
 │   └── test.py
@@ -251,68 +225,40 @@ PTCamera_waveshare/
 ├── 📁 Raspberrypi/              # 라즈베리파이 에이전트
 │   └── test.py
 │
+├── 📁 Refactoring/              # 리팩토링 진행 중인 코드
+│
 ├── 📄 calib.npz                 # 카메라 보정 파일
-├── 📄 yolov11m.pt               # YOLO 모델 (v11 medium)
-├── 📄 yolov11s.pt               # YOLO 모델 (v11 small)
-├── 📄 GPIO.py                   # GPIO 테스트 코드
+├── 📄 yolov11m_diff.pt          # YOLO 모델 (Diff 학습)
+├── 📄 ERTest.py                 # 이미지 처리 알고리즘 테스트
 └── 📄 README.md
 ```
 
 ---
 
-## 🔧 하드웨어 구성
-
-### 필수 장비
-
-| 항목 | 모델 | 용도 |
-|------|------|------|
-| **카메라 모듈** | Waveshare 2-Axis Pan-Tilt Camera | 팬-틸트 제어 |
-| **메인 컴퓨터** | Raspberry Pi 4 (4GB+) | 카메라 제어 및 이미지 전송 |
-| **모터 컨트롤러** | ESP32 | Pan-Tilt 모터 제어 |
-| **GUI 클라이언트** | Windows PC (CUDA 지원 권장) | YOLO 처리 및 UI |
-| **반사판** | 고휘도 적색 반사 필름 | 객체 인식 타겟 |
-
-### 핀 연결
-
-**Raspberry Pi ↔ ESP32**
-- GPIO 15 (BCM) → ESP32 입력 핀
-- GND → GND
-
-**ESP32 ↔ Pan-Tilt Motor**
-- UART TX/RX → 모터 시리얼 통신
-
----
-
 ## 📅 개발 이력
+
+### **2025-12-02: Auto Sequence & SAHI 적용**
+- ✅ **Auto Sequence**: Scan부터 Pointing까지 원클릭 자동화 구현
+- ✅ **SAHI 기법**: 6등분 타일링(Tiling)으로 작은 객체 인식률 향상
+- ✅ **Pointing Mode**: 레이저 차분(Diff) 알고리즘 고도화
+- ✅ **ERTest.py**: 이미지 처리 알고리즘 검증 도구 추가
+
+### **2025-11-30: Undistort GUI 분리**
+- ✅ 독립적인 왜곡 보정 도구 개발
+- ✅ 실시간 보정 프리뷰 기능 추가
 
 ### **2025-11-26: GPIO 하드웨어 테스트**
 - ✅ Raspberry Pi GPIO 15번 핀으로 ESP32 제어
 - ✅ LED ON/OFF 1초 주기 테스트 코드 작성
 
 ### **2025-11-18: 대규모 리팩토링 완료**
-- ✅ **코드 품질 개선**: Com_main.py 997줄 → 792줄 (21% 감소)
+- ✅ **코드 품질 개선**: Com_main.py 최적화
 - ✅ **모듈화**: controllers/, processors/, utils/ 분리
-- ✅ **개발 편의성**: config.py 중앙화, calib/yolo 자동 로드
-- ✅ **아키텍처 개선**: 관심사 분리, 재사용성 향상
-
-### **2025-10-27: 리팩토링 계획 수립**
-- 디렉토리 정리 완료
-- 서버 IP 자동 확인 계획
-- 실제 운영용/테스트용 코드 분리 계획
-
-### **2025-09-20: YOLO 학습 개선**
-- 보정된 이미지 기반으로 YOLO 재학습
-- Dataset_4 이상 학습 진행
-
-### **2025-09-17: YOLO 통합**
-- Dataset_3까지 학습한 모델 적용
-- 인식 성능 확인 (전반적으로 양호)
 
 ### **2025-09-15: 프로젝트 시작**
 - ✅ GUI 기능 구현 (Scan, Manual, Preview)
 - ✅ GPU 가속 지원 (CUDA)
 - ✅ 왜곡 보정 적용
-- ✅ 스캔 파라미터 최적화 (흔들림 제어)
 
 ---
 
@@ -331,12 +277,6 @@ PTCamera_waveshare/
 - ⚠️ **거리 제한**: 먼 거리에서 반사 성능 저하
 - ⚠️ **각도 민감도**: 스캔 각도에 따라 인식률 변동
 
-### 계획된 기능
-- [ ] 레이저 트래킹 프로세서 추가
-- [ ] 다중 타겟 우선순위 알고리즘
-- [ ] 웹 기반 모니터링 대시보드
-- [ ] 자동 캘리브레이션 기능
-
 ---
 
 ## 📄 라이선스
@@ -350,15 +290,6 @@ PTCamera_waveshare/
 **leontnhaps**
 - GitHub: [@leontnhaps](https://github.com/leontnhaps)
 - Repository: [PTCamera_waveshare](https://github.com/leontnhaps/PTCamera_waveshare)
-
----
-
-## 🙏 감사의 말
-
-- [Waveshare](https://www.waveshare.com/) - Pan-Tilt 카메라 모듈
-- [Ultralytics](https://github.com/ultralytics/ultralytics) - YOLOv11
-- [OpenCV](https://opencv.org/) - 컴퓨터 비전 라이브러리
-- [Raspberry Pi Foundation](https://www.raspberrypi.org/) - Picamera2
 
 ---
 
