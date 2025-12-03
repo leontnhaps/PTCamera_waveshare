@@ -193,6 +193,7 @@ ui_q: "queue.Queue[tuple[str,object]]" = queue.Queue()
 
 # ==== [NEW] 실시간 YOLO 파이프라인 ====
 _yolo_model = None  # 전역 YOLO 모델 (App에서 로드)
+_app_instance = None  # App 인스턴스 (undistort용)
 _yolo_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="YOLO")
 _scan_led_pairs = {}  # {session: {(pan, tilt): {'off': data, 'on': data}}}
 _scan_csv_files = {}  # {session: csv_writer}
@@ -302,7 +303,9 @@ class GuiImgClient(threading.Thread):
             
             off_img = cv2.imdecode(off_arr, cv2.IMREAD_COLOR)
             on_img = cv2.imdecode(on_arr, cv2.IMREAD_COLOR)
-            
+            if _app_instance and _app_instance._ud_K is not None:
+                off_img = _app_instance._undistort_bgr(off_img)
+                on_img = _app_instance._undistort_bgr(on_img)
             # 차분 이미지 계산
             diff_img = cv2.absdiff(on_img, off_img)
             
@@ -395,10 +398,15 @@ class ScrollFrame(Frame):
 # ---- GUI ----
 class App:
     def __init__(self, root: Tk):
+        global _app_instance
+        
         self.root = root
         root.title("Pan-Tilt Socket GUI (Client)")
         root.geometry("980x820")
         root.minsize(980, 820)  # 창 최소 크기 고정
+
+        # 전역 인스턴스 설정 (실시간 YOLO undistort용)
+        _app_instance = self
 
         # connections
         self.ctrl = GuiCtrlClient(SERVER_HOST, GUI_CTRL_PORT); self.ctrl.start()
