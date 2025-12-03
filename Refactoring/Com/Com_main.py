@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 # pc_gui.py — GUI client connecting to pc_server.py (not to Pi agent)
 
-import json, socket, threading, queue, pathlib, struct
+import json, socket, struct, threading, queue, pathlib, io
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor
 from tkinter import Tk, Label, Button, Scale, HORIZONTAL, IntVar, DoubleVar, Frame, Checkbutton, BooleanVar, filedialog, StringVar
 from tkinter import ttk
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageDraw
 import tkinter as tk  # ← 추가
 import os, re, csv, time   # ← 추가
 
@@ -43,19 +42,12 @@ def non_max_suppression(boxes, scores, iou_threshold):
         return indices.flatten()
     return []
 
-# ==== [NEW] 배치 크기 캐싱 (스캔 시 효율성 향상) ====
-_SAHI_OPTIMAL_BATCH_SIZE = None  # 최적 배치 크기 캐시
-# ==========================================================
-
 def predict_with_tiling(model, img, rows=2, cols=3, overlap=0.15, conf=0.25, iou=0.45, device='cuda'):
     """
     이미지를 타일로 쪼개서 예측 후 결과 병합
     rows, cols: 행/열 개수 (2x3 = 6등분)
     overlap: 타일 간 겹치는 비율 (0.15 = 15%)
-    [NEW] 🚀 적응형 배치 + 캐싱! (한 번 찾으면 계속 재사용)
     """
-    global _SAHI_OPTIMAL_BATCH_SIZE
-    
     H, W = img.shape[:2]
     
     # 타일 크기 계산 (겹침 포함)
@@ -82,69 +74,17 @@ def predict_with_tiling(model, img, rows=2, cols=3, overlap=0.15, conf=0.25, iou
             if x2 >= W: break
         if y2 >= H: break
 
-    # 타일 이미지 미리 추출
-    tile_images = [img[ty1:ty2, tx1:tx2] for (tx1, ty1, tx2, ty2) in tiles]
-    
-    # 적응형 배치 크기 (캐시된 값부터 시작)
-    all_batch_sizes = [6, 3, 2, 1]
-    
-    # 캐시된 최적 배치 크기가 있으면 그것부터 시작
-    if _SAHI_OPTIMAL_BATCH_SIZE is not None:
-        # 캐시된 크기부터 그 이하만 시도
-        idx = all_batch_sizes.index(_SAHI_OPTIMAL_BATCH_SIZE)
-        batch_sizes = all_batch_sizes[idx:]
-    else:
-        # 캐시 없으면 전체 시도
-        batch_sizes = all_batch_sizes
-    
-    batch_results = None
-    
-    for batch_size in batch_sizes:
-        try:
-            # GPU 캐시 정리
-            if device == 'cuda':
-                import torch
-                torch.cuda.empty_cache()
-            
-            # 배치로 나누어 추론
-            all_results = []
-            for i in range(0, len(tile_images), batch_size):
-                batch = tile_images[i:i+batch_size]
-                results = model.predict(batch, conf=conf, iou=iou, device=device, verbose=False)
-                all_results.extend(results)
-            
-            batch_results = all_results
-            
-            # 성공하면 캐시에 저장
-            if _SAHI_OPTIMAL_BATCH_SIZE != batch_size:
-                _SAHI_OPTIMAL_BATCH_SIZE = batch_size
-                print(f"[SAHI] ✅ 배치 크기 {batch_size}로 성공! (캐시에 저장)")
-            else:
-                print(f"[SAHI] ✅ 배치 크기 {batch_size}로 성공!")
-            
-            break  # 성공하면 루프 종료
-            
-        except RuntimeError as e:
-            if "out of memory" in str(e).lower() or "oom" in str(e).lower():
-                if batch_size == 1:
-                    # 1개도 안 되면 진짜 문제
-                    print(f"[SAHI] ❌ GPU 메모리 심각 부족! (배치 크기 1도 실패)")
-                    raise
-                else:
-                    print(f"[SAHI] ⚠️ 배치 크기 {batch_size} OOM, {batch_sizes[batch_sizes.index(batch_size)+1]}로 재시도...")
-                    # 캐시 무효화 (메모리 상황이 바뀜)
-                    _SAHI_OPTIMAL_BATCH_SIZE = None
-                    continue
-            else:
-                # 다른 에러는 그대로 raise
-                raise
-    
-    # 결과 처리
-    all_boxes = []
+    # 모든 타일 추론
+    all_boxes = []   # [x, y, w, h]
     all_scores = []
     all_classes = []
     
-    for i, (results, (tx1, ty1, tx2, ty2)) in enumerate(zip(batch_results, tiles)):
+    for i, (tx1, ty1, tx2, ty2) in enumerate(tiles):
+        tile_img = img[ty1:ty2, tx1:tx2]
+        
+        # YOLO 추론
+        results = model.predict(tile_img, conf=conf, iou=iou, device=device, verbose=False)[0]
+        
         if results.boxes:
             for box in results.boxes:
                 x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
@@ -191,15 +131,6 @@ DEFAULT_OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 ui_q: "queue.Queue[tuple[str,object]]" = queue.Queue()
 
-# ==== [NEW] 실시간 YOLO 파이프라인 ====
-_yolo_model = None  # 전역 YOLO 모델 (App에서 로드)
-_app_instance = None  # App 인스턴스 (undistort용)
-_yolo_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="YOLO")
-_scan_led_pairs = {}  # {session: {(pan, tilt): {'off': data, 'on': data}}}
-_scan_csv_files = {}  # {session: csv_writer}
-_scan_lock = threading.Lock()
-# =========================================
-
 # ---- client sockets ----
 class GuiCtrlClient(threading.Thread):
     def __init__(self, host, port):
@@ -233,107 +164,6 @@ class GuiCtrlClient(threading.Thread):
 class GuiImgClient(threading.Thread):
     def __init__(self, host, port, outdir: pathlib.Path):
         super().__init__(daemon=True); self.host=host; self.port=port; self.outdir=outdir; self.sock=None
-    
-    def _process_scan_image(self, name, data):
-        """실시간 스캔 이미지 처리 (LED ON/OFF 쌍 감지 및 YOLO)"""
-        # 파일명 파싱: scan_20241203_120000_pan-30_tilt15_off.jpg
-        import re
-        match = re.match(r'(scan_\d{8}_\d{6})_pan([\-\d]+)_tilt([\-\d]+)_(off|on)\.jpg', name)
-        if not match:
-            return False  # 스캔 이미지 아님
-        
-        session, pan, tilt, led_state = match.groups()
-        pan, tilt = int(pan), int(tilt)
-        
-        with _scan_lock:
-            # 세션별 LED 쌍 딕셔너리 초기화
-            if session not in _scan_led_pairs:
-                _scan_led_pairs[session] = {}
-                # CSV 파일 생성
-                csv_path = self.outdir / f"{session}_results.csv"
-                csv_f = open(csv_path, 'w', newline='', encoding='utf-8')
-                csv_writer = csv.writer(csv_f)
-                csv_writer.writerow(['pan', 'tilt', 'class', 'confidence', 'x', 'y', 'w', 'h'])
-                _scan_csv_files[session] = (csv_f, csv_writer)
-            
-            # 위치별 LED 쌍 저장
-            pos_key = (pan, tilt)
-            if pos_key not in _scan_led_pairs[session]:
-                _scan_led_pairs[session][pos_key] = {}
-            
-            _scan_led_pairs[session][pos_key][led_state] = data
-            
-            # LED OFF/ON 쌍이 완성되었는지 확인
-            pair = _scan_led_pairs[session][pos_key]
-            if 'off' in pair and 'on' in pair:
-                # 쌍 완성! 백그라운드에서 YOLO 처리
-                off_data = pair['off']
-                on_data = pair['on']
-                csv_writer = _scan_csv_files[session][1]
-                
-                # 백그라운드 YOLO 처리 제출
-                _yolo_executor.submit(
-                    self._process_led_pair,
-                    session, pan, tilt, off_data, on_data, csv_writer
-                )
-                
-                # 처리된 쌍 제거 (메모리 절약)
-                del _scan_led_pairs[session][pos_key]
-                
-                print(f"[SCAN] LED 쌍 수신: pan={pan}, tilt={tilt} → YOLO 처리 중...")
-        
-        return True
-    
-    def _process_led_pair(self, session, pan, tilt, off_data, on_data, csv_writer):
-        """LED ON/OFF 쌍에 대해 YOLO 처리 (백그라운드)"""
-        global _yolo_model
-        
-        try:
-            # YOLO 모델 체크
-            if _yolo_model is None:
-                print(f"[SCAN] YOLO 모델 미로드, 스킵: pan={pan}, tilt={tilt}")
-                return
-            
-            # 이미지 디코딩
-            import numpy as np
-            import cv2
-            
-            off_arr = np.frombuffer(off_data, dtype=np.uint8)
-            on_arr = np.frombuffer(on_data, dtype=np.uint8)
-            
-            off_img = cv2.imdecode(off_arr, cv2.IMREAD_COLOR)
-            on_img = cv2.imdecode(on_arr, cv2.IMREAD_COLOR)
-            if _app_instance and _app_instance._ud_K is not None:
-                off_img = _app_instance._undistort_bgr(off_img)
-                on_img = _app_instance._undistort_bgr(on_img)
-            # 차분 이미지 계산
-            diff_img = cv2.absdiff(on_img, off_img)
-            
-            # 🚀 SAHI 타일링으로 YOLO 처리
-            boxes, scores, classes = predict_with_tiling(
-                _yolo_model, diff_img,
-                rows=2, cols=3,
-                overlap=0.15,
-                conf=0.25,
-                iou=0.45,
-                device='cuda' if _TORCH_AVAILABLE and torch.cuda.is_available() else 'cpu'
-            )
-            
-            # CSV에 결과 기록
-            with _scan_lock:
-                csv_f, writer = _scan_csv_files[session]
-                for box, score, cls in zip(boxes, scores, classes):
-                    x, y, w, h = box
-                    writer.writerow([pan, tilt, cls, f"{score:.4f}", x, y, w, h])
-                csv_f.flush()  # 즉시 디스크에 기록
-            
-            print(f"[SCAN] YOLO 완료: pan={pan}, tilt={tilt}, 검출={len(boxes)}개")
-            
-        except Exception as e:
-            import traceback
-            print(f"[SCAN] YOLO 에러 (pan={pan}, tilt={tilt}): {e}")
-            traceback.print_exc()
-    
     def run(self):
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -351,14 +181,9 @@ class GuiImgClient(threading.Thread):
                     if not chunk: raise ConnectionError("img closed")
                     buf+=chunk; remain-=len(chunk)
                 data = bytes(buf)
-                
                 if name.startswith("_preview_"):
                     ui_q.put(("preview", data))
                 else:
-                    # 스캔 이미지인지 확인 및 실시간 처리
-                    is_scan = self._process_scan_image(name, data)
-                    
-                    # 일반 저장
                     self.outdir.mkdir(parents=True, exist_ok=True)
                     with open(self.outdir / name, "wb") as f: f.write(data)
                     ui_q.put(("saved", (name, data)))
@@ -398,15 +223,10 @@ class ScrollFrame(Frame):
 # ---- GUI ----
 class App:
     def __init__(self, root: Tk):
-        global _app_instance
-        
         self.root = root
         root.title("Pan-Tilt Socket GUI (Client)")
         root.geometry("980x820")
         root.minsize(980, 820)  # 창 최소 크기 고정
-
-        # 전역 인스턴스 설정 (실시간 YOLO undistort용)
-        _app_instance = self
 
         # connections
         self.ctrl = GuiCtrlClient(SERVER_HOST, GUI_CTRL_PORT); self.ctrl.start()
@@ -879,23 +699,10 @@ class App:
 
     def load_yolo_weights(self):
         """YOLO 가중치 파일 (.pt) 로드"""
-        global _yolo_model
-        
         path = filedialog.askopenfilename(filetypes=[("YOLO weights", "*.pt"), ("All files", "*.*")])
         if path:
             self.yolo_wpath.set(path)
-            
-            # YOLO 모델 로드
-            if _YOLO_OK:
-                try:
-                    _yolo_model = YOLO(path)
-                    ui_q.put(("toast", f"✅ YOLO 모델 로드 완료: {pathlib.Path(path).name}"))
-                    print(f"[YOLO] 모델 로드 완료, 실시간 스캔 준비됨!")
-                except Exception as e:
-                    ui_q.put(("toast", f"❌ YOLO 로드 실패: {e}"))
-                    _yolo_model = None
-            else:
-                ui_q.put(("toast", f"⚠️ YOLO 라이브러리 미설치"))
+            ui_q.put(("toast", f"YOLO 가중치 로드: {pathlib.Path(path).name}"))
 
     # actions
     def start_scan(self):
@@ -1863,8 +1670,231 @@ class App:
         except Exception as e:
             self._pointing_logging = False
             ui_q.put(("toast", f"[Point] 로그 시작 실패: {e}"))
+    def _interp_fit(self, fmap: dict, q: float, key_slope: str, k: int = 2):
+        """근처 k개 키로 1/d 가중 평균 보간 (기울기 a 또는 e 추정)."""
+        import numpy as np
+        if not fmap:
+            return np.nan
+        ks = np.array(list(fmap.keys()), float)
+        vs = np.array([fmap[k][key_slope] for k in fmap], float)
+        order = np.argsort(np.abs(ks - q))[:max(1, min(k, len(ks)))]
+        sel_k, sel_v = ks[order], vs[order]
+        d = np.abs(sel_k - q) + 1e-6
+        w = 1.0 / d
+        return float(np.sum(sel_v * w) / np.sum(w))
 
+    def _centering_on_centroid(self, m_cx: float, m_cy: float, W: int, H: int):
+        """프리뷰에서 평균점 얻을 때마다 호출 → 작은 각도 스텝으로 중앙 수렴."""
+        import time, numpy as np
+        if not self.centering_enable.get():
+            self._centering_ok_frames = 0
+            return
 
+        # 중앙 오차(px)
+        ex = (W/2.0) - float(m_cx)
+        ey = (H/2.0) - float(m_cy)
+        tol = int(self.centering_px_tol.get())
+
+        # 안정 프레임 카운트
+        if abs(ex) <= tol and abs(ey) <= tol:
+            self._centering_ok_frames += 1
+        else:
+            self._centering_ok_frames = 0
+
+        # 충분히 안정되면 종료 메시지(선택)
+        if self._centering_ok_frames >= int(self.centering_min_frames.get()):
+            return
+
+        # 쿨다운(명령 과다 방지)
+        now_ms = int(time.time() * 1000)
+        if now_ms - self._centering_last_ms < int(self.centering_cooldown.get()):
+            return
+
+        # px/deg 기울기 추정: a=∂cx/∂pan (tilt근방), e=∂cy/∂tilt (pan근방)
+        a = self._interp_fit(getattr(self, "_fits_h", {}), self._curr_tilt, "a", k=2)
+        e = self._interp_fit(getattr(self, "_fits_v", {}), self._curr_pan,  "e", k=2)
+
+        # 기울기 없으면 보수적으로 스킵
+        if not np.isfinite(a) or abs(a) < 1e-6 or not np.isfinite(e) or abs(e) < 1e-6:
+            return
+
+        # 각도 보정량(°)
+        dpan  = float(np.clip(ex / a, -float(self.centering_max_step.get()), float(self.centering_max_step.get())))
+        dtilt = float(np.clip(ey / e, -float(self.centering_max_step.get()), float(self.centering_max_step.get())))
+
+        # 현재 명령 각도 업데이트
+        self._curr_pan  = float(self._curr_pan  + dpan)
+        self._curr_tilt = float(self._curr_tilt + dtilt)
+
+        # 이동 명령
+        self.ctrl.send({
+            "cmd":"move",
+            "pan":  self._curr_pan,
+            "tilt": self._curr_tilt,
+            "speed": int(self.point_speed.get()),
+            "acc":   float(self.point_acc.get())
+        })
+        self._centering_last_ms = now_ms
+
+    def _centering_on_laser(self, lx: float, ly: float, W: int, H: int):
+        """
+        레이저 점(lx,ly) 기준 정밀 보정.
+        pan: 중앙(W/2) 기준
+        tilt: (H/2 + Δy) 기준  ← Δy = self.laser_target_y_offset_px
+        """
+        import time, numpy as np
+        if not self.centering_enable.get():
+            self._centering_ok_frames = 0
+            return
+
+        # 목표 좌표
+        target_x = W/2.0
+        target_y = H/2.0 + float(self.laser_target_y_offset_px.get())
+
+        # 오차(px)
+        ex = (target_x - float(lx))
+        ey = (target_y - float(ly))
+        tol = int(self.centering_px_tol.get())
+
+        # 안정 판정
+        if abs(ex) <= tol and abs(ey) <= tol:
+            self._centering_ok_frames += 1
+        else:
+            self._centering_ok_frames = 0
+        if self._centering_ok_frames >= int(self.centering_min_frames.get()):
+            return
+
+        # 쿨다운
+        now_ms = int(time.time() * 1000)
+        if now_ms - self._centering_last_ms < int(self.centering_cooldown.get()):
+            return
+
+        # px/deg 추정: a=∂cx/∂pan, e=∂cy/∂tilt (CSV에서 회귀한 값 보간)
+        a = self._interp_fit(getattr(self, "_fits_h", {}), self._curr_tilt, "a", k=2)
+        e = self._interp_fit(getattr(self, "_fits_v", {}), self._curr_pan,  "e", k=2)
+        if not np.isfinite(a) or abs(a) < 1e-6 or not np.isfinite(e) or abs(e) < 1e-6:
+            return
+
+        # 각도 보정량(°) 클램프
+        dpan  = float(np.clip(ex / a, -float(self.centering_max_step.get()), float(self.centering_max_step.get())))
+        dtilt = float(np.clip(ey / e, -float(self.centering_max_step.get()), float(self.centering_max_step.get())))
+
+        # 누적/전송
+        self._curr_pan  = float(self._curr_pan  + dpan)
+        self._curr_tilt = float(self._curr_tilt + dtilt)
+        self.ctrl.send({
+            "cmd":"move",
+            "pan":  self._curr_pan,
+            "tilt": self._curr_tilt,
+            "speed": int(self.point_speed.get()),
+            "acc":   float(self.point_acc.get())
+        })
+        self._centering_last_ms = now_ms
+    def _detect_red_laser(self, bgr: np.ndarray):
+        """
+        빨간 레이저 포인트를 HSV 두 구간(0~H1, H2~180) + S/V 임계로 마스크한 뒤
+        연결요소에서 '점수 = 평균 V * 면적'이 가장 큰 blob의 subpixel 중심을 반환.
+        반환: (found: bool, cx: float, cy: float, score: float)
+        """
+        try:
+            hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+            H1_lo, H1_hi = int(self.laser_h_lo1.get()), int(self.laser_h_hi1.get())
+            H2_lo, H2_hi = int(self.laser_h_lo2.get()), int(self.laser_h_hi2.get())
+            S_min, V_min = int(self.laser_s_min.get()), int(self.laser_v_min.get())
+
+            h, s, v = cv2.split(hsv)
+
+            # 빨강 hue는 양끝단에 걸려서 두 구간 합침
+            m1 = cv2.inRange(h, H1_lo, H1_hi)
+            m2 = cv2.inRange(h, H2_lo, H2_hi)
+            mh = cv2.bitwise_or(m1, m2)
+
+            ms = cv2.inRange(s, S_min, 255)
+            mv = cv2.inRange(v, V_min, 255)
+
+            mask = cv2.bitwise_and(mh, cv2.bitwise_and(ms, mv))
+
+            # 모폴로지 오픈으로 노이즈 제거
+            ksz = max(0, int(self.laser_open_ksz.get()))
+            if ksz > 0:
+                k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2*ksz+1, 2*ksz+1))
+                mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k, iterations=1)
+
+            # 연결요소로 blob 스코어링
+            num, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+            if num <= 1:
+                return (False, 0.0, 0.0, 0.0)
+
+            minA = int(self.laser_min_area.get())
+            maxA = int(self.laser_max_area.get())
+
+            best = (-1, -1.0)  # (idx, score)
+            for i in range(1, num):
+                x,y,w,h,a = stats[i]
+                if a < minA or a > maxA: 
+                    continue
+
+                # blob 평균 V를 계산해서 포화/광원과 구분(채도가 이미 크지만 보정)
+                mask_i = (labels == i).astype(np.uint8)
+                mean_v = float(cv2.mean(v, mask=mask_i)[0])
+                score = mean_v * float(a)  # 간단한 점수 함수
+
+                if score > best[1]:
+                    best = (i, score)
+
+            if best[0] < 0:
+                return (False, 0.0, 0.0, 0.0)
+
+            # subpixel 무게중심(밝기 가중치; V를 가중치로 사용)
+            i = best[0]
+            mask_i = (labels == i).astype(np.uint8)
+            ys, xs = np.nonzero(mask_i)
+            if xs.size == 0:
+                return (False, 0.0, 0.0, 0.0)
+            weights = v[ys, xs].astype(np.float32) + 1.0
+            cx = float(np.sum(xs * weights) / np.sum(weights))
+            cy = float(np.sum(ys * weights) / np.sum(weights))
+            return (True, cx, cy, float(best[1]))
+        except Exception as e:
+            print("[laser] detect err:", e)
+            return (False, 0.0, 0.0, 0.0)
+    def _align_laser_to_film(self, lx: float, ly: float, tx: float, ty: float, W: int, H: int):
+        """
+        레이저 (lx, ly)를 타깃 (tx, ty) = '필름 중심'으로 정렬.
+        px 오차 → a,e로 각도 환산 → 쿨다운/클램프 → 이동
+        """
+        import time, numpy as np
+        if not self.centering_enable.get():
+            return
+
+        ex = float(tx) - float(lx)
+        ey = float(ty) - float(ly)
+
+        # 쿨다운
+        now_ms = int(time.time() * 1000)
+        if now_ms - self._centering_last_ms < int(self.centering_cooldown.get()):
+            return
+
+        # px/deg 추정
+        a = self._interp_fit(getattr(self, "_fits_h", {}), self._curr_tilt, "a", k=2)
+        e = self._interp_fit(getattr(self, "_fits_v", {}), self._curr_pan,  "e", k=2)
+        if not np.isfinite(a) or abs(a) < 1e-6 or not np.isfinite(e) or abs(e) < 1e-6:
+            return
+
+        dpan  = float(np.clip(ex / a, -float(self.centering_max_step.get()), float(self.centering_max_step.get())))
+        dtilt = float(np.clip(ey / e, -float(self.centering_max_step.get()), float(self.centering_max_step.get())))
+
+        self._curr_pan  = float(self._curr_pan  + dpan)
+        self._curr_tilt = float(self._curr_tilt + dtilt)
+
+        self.ctrl.send({
+            "cmd":"move",
+            "pan":  self._curr_pan,
+            "tilt": self._curr_tilt,
+            "speed": int(self.point_speed.get()),
+            "acc":   float(self.point_acc.get())
+        })
+        self._centering_last_ms = now_ms
 
 def main():
     root = Tk()
