@@ -233,22 +233,6 @@ PTCamera_waveshare/
 │
 ├── 📁 Docs/                     # 📄 문서 및 논문
 │
-├── 📄 calib.npz                 # 카메라 보정 파일
-├── 📄 yolov11m_diff.pt          # YOLO 모델 (Diff 학습)
-└── 📄 README.md
-```
-
----
-
-## 📅 개발 이력
-
-### **2025-12-02: Auto Sequence & SAHI 적용**
-- ✅ **Auto Sequence**: Scan부터 Pointing까지 원클릭 자동화 구현
-- ✅ **SAHI 기법**: 6등분 타일링(Tiling)으로 작은 객체 인식률 향상
-- ✅ **Pointing Mode**: 레이저 차분(Diff) 알고리즘 고도화
-- ✅ **ERTest.py**: 이미지 처리 알고리즘 검증 도구 추가
-
-### **2025-11-30: Undistort GUI 분리**
 - ✅ 독립적인 왜곡 보정 도구 개발
 - ✅ 실시간 보정 프리뷰 기능 추가
 
