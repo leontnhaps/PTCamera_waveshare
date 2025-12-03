@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # pc_gui.py — GUI client connecting to pc_server.py (not to Pi agent)
 
-import json, socket, threading, queue, pathlib
+import json, socket, threading, queue, pathlib, struct
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 from tkinter import Tk, Label, Button, Scale, HORIZONTAL, IntVar, DoubleVar, Frame, Checkbutton, BooleanVar, filedialog, StringVar
 from tkinter import ttk
 from PIL import Image, ImageTk
@@ -42,12 +43,19 @@ def non_max_suppression(boxes, scores, iou_threshold):
         return indices.flatten()
     return []
 
+# ==== [NEW] 배치 크기 캐싱 (스캔 시 효율성 향상) ====
+_SAHI_OPTIMAL_BATCH_SIZE = None  # 최적 배치 크기 캐시
+# ==========================================================
+
 def predict_with_tiling(model, img, rows=2, cols=3, overlap=0.15, conf=0.25, iou=0.45, device='cuda'):
     """
     이미지를 타일로 쪼개서 예측 후 결과 병합
     rows, cols: 행/열 개수 (2x3 = 6등분)
     overlap: 타일 간 겹치는 비율 (0.15 = 15%)
+    [NEW] 🚀 적응형 배치 + 캐싱! (한 번 찾으면 계속 재사용)
     """
+    global _SAHI_OPTIMAL_BATCH_SIZE
+    
     H, W = img.shape[:2]
     
     # 타일 크기 계산 (겹침 포함)
@@ -74,17 +82,69 @@ def predict_with_tiling(model, img, rows=2, cols=3, overlap=0.15, conf=0.25, iou
             if x2 >= W: break
         if y2 >= H: break
 
-    # 모든 타일 추론
-    all_boxes = []   # [x, y, w, h]
+    # 타일 이미지 미리 추출
+    tile_images = [img[ty1:ty2, tx1:tx2] for (tx1, ty1, tx2, ty2) in tiles]
+    
+    # 적응형 배치 크기 (캐시된 값부터 시작)
+    all_batch_sizes = [6, 3, 2, 1]
+    
+    # 캐시된 최적 배치 크기가 있으면 그것부터 시작
+    if _SAHI_OPTIMAL_BATCH_SIZE is not None:
+        # 캐시된 크기부터 그 이하만 시도
+        idx = all_batch_sizes.index(_SAHI_OPTIMAL_BATCH_SIZE)
+        batch_sizes = all_batch_sizes[idx:]
+    else:
+        # 캐시 없으면 전체 시도
+        batch_sizes = all_batch_sizes
+    
+    batch_results = None
+    
+    for batch_size in batch_sizes:
+        try:
+            # GPU 캐시 정리
+            if device == 'cuda':
+                import torch
+                torch.cuda.empty_cache()
+            
+            # 배치로 나누어 추론
+            all_results = []
+            for i in range(0, len(tile_images), batch_size):
+                batch = tile_images[i:i+batch_size]
+                results = model.predict(batch, conf=conf, iou=iou, device=device, verbose=False)
+                all_results.extend(results)
+            
+            batch_results = all_results
+            
+            # 성공하면 캐시에 저장
+            if _SAHI_OPTIMAL_BATCH_SIZE != batch_size:
+                _SAHI_OPTIMAL_BATCH_SIZE = batch_size
+                print(f"[SAHI] ✅ 배치 크기 {batch_size}로 성공! (캐시에 저장)")
+            else:
+                print(f"[SAHI] ✅ 배치 크기 {batch_size}로 성공!")
+            
+            break  # 성공하면 루프 종료
+            
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower() or "oom" in str(e).lower():
+                if batch_size == 1:
+                    # 1개도 안 되면 진짜 문제
+                    print(f"[SAHI] ❌ GPU 메모리 심각 부족! (배치 크기 1도 실패)")
+                    raise
+                else:
+                    print(f"[SAHI] ⚠️ 배치 크기 {batch_size} OOM, {batch_sizes[batch_sizes.index(batch_size)+1]}로 재시도...")
+                    # 캐시 무효화 (메모리 상황이 바뀜)
+                    _SAHI_OPTIMAL_BATCH_SIZE = None
+                    continue
+            else:
+                # 다른 에러는 그대로 raise
+                raise
+    
+    # 결과 처리
+    all_boxes = []
     all_scores = []
     all_classes = []
     
-    for i, (tx1, ty1, tx2, ty2) in enumerate(tiles):
-        tile_img = img[ty1:ty2, tx1:tx2]
-        
-        # YOLO 추론
-        results = model.predict(tile_img, conf=conf, iou=iou, device=device, verbose=False)[0]
-        
+    for i, (results, (tx1, ty1, tx2, ty2)) in enumerate(zip(batch_results, tiles)):
         if results.boxes:
             for box in results.boxes:
                 x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
@@ -131,6 +191,14 @@ DEFAULT_OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 ui_q: "queue.Queue[tuple[str,object]]" = queue.Queue()
 
+# ==== [NEW] 실시간 YOLO 파이프라인 ====
+_yolo_model = None  # 전역 YOLO 모델 (App에서 로드)
+_yolo_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="YOLO")
+_scan_led_pairs = {}  # {session: {(pan, tilt): {'off': data, 'on': data}}}
+_scan_csv_files = {}  # {session: csv_writer}
+_scan_lock = threading.Lock()
+# =========================================
+
 # ---- client sockets ----
 class GuiCtrlClient(threading.Thread):
     def __init__(self, host, port):
@@ -164,6 +232,105 @@ class GuiCtrlClient(threading.Thread):
 class GuiImgClient(threading.Thread):
     def __init__(self, host, port, outdir: pathlib.Path):
         super().__init__(daemon=True); self.host=host; self.port=port; self.outdir=outdir; self.sock=None
+    
+    def _process_scan_image(self, name, data):
+        """실시간 스캔 이미지 처리 (LED ON/OFF 쌍 감지 및 YOLO)"""
+        # 파일명 파싱: scan_20241203_120000_pan-30_tilt15_off.jpg
+        import re
+        match = re.match(r'(scan_\d{8}_\d{6})_pan([\-\d]+)_tilt([\-\d]+)_(off|on)\.jpg', name)
+        if not match:
+            return False  # 스캔 이미지 아님
+        
+        session, pan, tilt, led_state = match.groups()
+        pan, tilt = int(pan), int(tilt)
+        
+        with _scan_lock:
+            # 세션별 LED 쌍 딕셔너리 초기화
+            if session not in _scan_led_pairs:
+                _scan_led_pairs[session] = {}
+                # CSV 파일 생성
+                csv_path = self.outdir / f"{session}_results.csv"
+                csv_f = open(csv_path, 'w', newline='', encoding='utf-8')
+                csv_writer = csv.writer(csv_f)
+                csv_writer.writerow(['pan', 'tilt', 'class', 'confidence', 'x', 'y', 'w', 'h'])
+                _scan_csv_files[session] = (csv_f, csv_writer)
+            
+            # 위치별 LED 쌍 저장
+            pos_key = (pan, tilt)
+            if pos_key not in _scan_led_pairs[session]:
+                _scan_led_pairs[session][pos_key] = {}
+            
+            _scan_led_pairs[session][pos_key][led_state] = data
+            
+            # LED OFF/ON 쌍이 완성되었는지 확인
+            pair = _scan_led_pairs[session][pos_key]
+            if 'off' in pair and 'on' in pair:
+                # 쌍 완성! 백그라운드에서 YOLO 처리
+                off_data = pair['off']
+                on_data = pair['on']
+                csv_writer = _scan_csv_files[session][1]
+                
+                # 백그라운드 YOLO 처리 제출
+                _yolo_executor.submit(
+                    self._process_led_pair,
+                    session, pan, tilt, off_data, on_data, csv_writer
+                )
+                
+                # 처리된 쌍 제거 (메모리 절약)
+                del _scan_led_pairs[session][pos_key]
+                
+                print(f"[SCAN] LED 쌍 수신: pan={pan}, tilt={tilt} → YOLO 처리 중...")
+        
+        return True
+    
+    def _process_led_pair(self, session, pan, tilt, off_data, on_data, csv_writer):
+        """LED ON/OFF 쌍에 대해 YOLO 처리 (백그라운드)"""
+        global _yolo_model
+        
+        try:
+            # YOLO 모델 체크
+            if _yolo_model is None:
+                print(f"[SCAN] YOLO 모델 미로드, 스킵: pan={pan}, tilt={tilt}")
+                return
+            
+            # 이미지 디코딩
+            import numpy as np
+            import cv2
+            
+            off_arr = np.frombuffer(off_data, dtype=np.uint8)
+            on_arr = np.frombuffer(on_data, dtype=np.uint8)
+            
+            off_img = cv2.imdecode(off_arr, cv2.IMREAD_COLOR)
+            on_img = cv2.imdecode(on_arr, cv2.IMREAD_COLOR)
+            
+            # 차분 이미지 계산
+            diff_img = cv2.absdiff(on_img, off_img)
+            
+            # 🚀 SAHI 타일링으로 YOLO 처리
+            boxes, scores, classes = predict_with_tiling(
+                _yolo_model, diff_img,
+                rows=2, cols=3,
+                overlap=0.15,
+                conf=0.25,
+                iou=0.45,
+                device='cuda' if _TORCH_AVAILABLE and torch.cuda.is_available() else 'cpu'
+            )
+            
+            # CSV에 결과 기록
+            with _scan_lock:
+                csv_f, writer = _scan_csv_files[session]
+                for box, score, cls in zip(boxes, scores, classes):
+                    x, y, w, h = box
+                    writer.writerow([pan, tilt, cls, f"{score:.4f}", x, y, w, h])
+                csv_f.flush()  # 즉시 디스크에 기록
+            
+            print(f"[SCAN] YOLO 완료: pan={pan}, tilt={tilt}, 검출={len(boxes)}개")
+            
+        except Exception as e:
+            import traceback
+            print(f"[SCAN] YOLO 에러 (pan={pan}, tilt={tilt}): {e}")
+            traceback.print_exc()
+    
     def run(self):
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -181,9 +348,14 @@ class GuiImgClient(threading.Thread):
                     if not chunk: raise ConnectionError("img closed")
                     buf+=chunk; remain-=len(chunk)
                 data = bytes(buf)
+                
                 if name.startswith("_preview_"):
                     ui_q.put(("preview", data))
                 else:
+                    # 스캔 이미지인지 확인 및 실시간 처리
+                    is_scan = self._process_scan_image(name, data)
+                    
+                    # 일반 저장
                     self.outdir.mkdir(parents=True, exist_ok=True)
                     with open(self.outdir / name, "wb") as f: f.write(data)
                     ui_q.put(("saved", (name, data)))
@@ -699,10 +871,23 @@ class App:
 
     def load_yolo_weights(self):
         """YOLO 가중치 파일 (.pt) 로드"""
+        global _yolo_model
+        
         path = filedialog.askopenfilename(filetypes=[("YOLO weights", "*.pt"), ("All files", "*.*")])
         if path:
             self.yolo_wpath.set(path)
-            ui_q.put(("toast", f"YOLO 가중치 로드: {pathlib.Path(path).name}"))
+            
+            # YOLO 모델 로드
+            if _YOLO_OK:
+                try:
+                    _yolo_model = YOLO(path)
+                    ui_q.put(("toast", f"✅ YOLO 모델 로드 완료: {pathlib.Path(path).name}"))
+                    print(f"[YOLO] 모델 로드 완료, 실시간 스캔 준비됨!")
+                except Exception as e:
+                    ui_q.put(("toast", f"❌ YOLO 로드 실패: {e}"))
+                    _yolo_model = None
+            else:
+                ui_q.put(("toast", f"⚠️ YOLO 라이브러리 미설치"))
 
     # actions
     def start_scan(self):
