@@ -231,40 +231,133 @@ PTCamera_waveshare/
 │   ├── diff_*.py                # 다양한 이미지 처리 튜너
 │   └── ...
 │
+├── 📁 Refactoring/              # 🔧 리팩토링 코드 (새로 추가)
+│   ├── Com/Com_main.py          # 정리된 GUI (1680줄, -226줄)
+│   ├── Raspberrypi/Rasp_main.py # 서버 IP 선택 기능 추가
+│   └── Server/Server_main.py    # 미사용 import 제거
+│
 ├── 📁 Docs/                     # 📄 문서 및 논문
 │
-- ✅ 독립적인 왜곡 보정 도구 개발
-- ✅ 실시간 보정 프리뷰 기능 추가
+├── 📄 calib.npz                 # 카메라 보정 파일
+├── 📄 yolov11m_diff.pt          # YOLO 모델 (Diff 학습)
+└── 📄 README.md
+```
 
-### **2025-11-26: GPIO 하드웨어 테스트**
-- ✅ Raspberry Pi GPIO 15번 핀으로 ESP32 제어
-- ✅ LED ON/OFF 1초 주기 테스트 코드 작성
+---
 
-### **2025-11-18: 대규모 리팩토링 완료**
-- ✅ **코드 품질 개선**: Com_main.py 최적화
-- ✅ **모듈화**: controllers/, processors/, utils/ 분리
+## 🔧 리팩토링 (Refactoring)
 
-### **2025-09-15: 프로젝트 시작**
-- ✅ GUI 기능 구현 (Scan, Manual, Preview)
-- ✅ GPU 가속 지원 (CUDA)
-- ✅ 왜곡 보정 적용
+### 📁 `Refactoring/` 폴더
+
+**목적**: 원본 코드를 보존하면서 안전하게 코드 개선 작업 수행
+
+```
+Refactoring/
+├── Com/
+│   └── Com_main.py (1680줄, -226줄 from original)
+├── Raspberrypi/
+│   └── Rasp_main.py (383줄, +25줄 with new features)
+└── Server/
+    └── Server_main.py (226줄, -1줄)
+```
+
+### 📊 리팩토링 요약
+
+| 컴포넌트 | 작업 내용 | Before | After | 변화 |
+|---------|---------|--------|-------|------|
+| **Com** | 미사용 함수 5개 + import 3개 삭제 | 1906줄 | 1680줄 | **-226줄 (-11.9%)** |
+| **Raspberrypi** | 서버 IP 선택 메뉴 추가 | 358줄 | 383줄 | +25줄 (기능 추가) |
+| **Server** | 미사용 import 1개 삭제 | 227줄 | 226줄 | -1줄 |
+| **합계** | | 2491줄 | 2289줄 | **-202줄 (-8.1%)** |
+
+#### Com/Com_main.py
+
+**삭제된 미사용 함수 (235줄):**
+- `_centering_on_laser()` (54줄)
+- `_detect_red_laser()` (68줄)
+- `_align_laser_to_film()` (37줄)
+- `_centering_on_centroid()` (52줄)
+- `_interp_fit()` (13줄)
+
+**삭제된 미사용 import (3개):**
+- `struct`, `io`, `ImageDraw`
+
+#### Raspberrypi/Rasp_main.py
+
+**새로운 기능: 서버 IP 선택 메뉴**
+
+실행 시 서버를 대화형으로 선택 가능:
+```
+==================================================
+서버 선택 (Server Selection)
+==================================================
+  [1] 711a       → 192.168.0.9
+  [2] 602a       → 172.30.1.13
+  [3] hotspot    → 10.95.38.118
+==================================================
+서버 번호를 선택하세요 (1/2/3) [기본값: 2]: 
+```
+
+**장점:**
+- 코드 수정 없이 서버 전환
+- 실수 방지 (잘못된 입력 재요청)
+- 환경 변수로 우회 가능
+
+#### Server/Server_main.py
+
+**삭제된 미사용 import:**
+- `os` (사용되지 않음)
+
+### 🗂️ Experiments 폴더 정리
+
+**Before (17개 파일):**
+- GPIO.py, HSV.py, diff_gemini.py, diff_hsv_tuner.py, diff_image_red.py, diff_image_yellow.py, diff_rgb_tuner.py, diff_rgb_two.py, diff_universe.py, generate_diff_dataset.py, image_diff.py, laserdiff.py, last_filter.py, modify_test.py, rate_image.py, undistort_gui.py, yolo_test_folder.py
+
+**After (13개 파일, 통일된 명명 규칙):**
+- `Laser_GPIO.py` - GPIO 테스트
+- `SAHI_yolo_test.py` - YOLO 타일링 테스트
+- `diff_filter_1_2.py` - Universe + RGB Two 통합 필터
+- `diff_filter_hsv.py` - HSV 필터 튜너
+- `diff_filter_red.py` - Red 필터 튜너
+- `diff_filter_red_yellow.py` - Red & Yellow 통합 필터
+- `diff_filter_rgb.py` - RGB 필터 튜너
+- `diff_filter_yellow.py` - Yellow 필터 튜너
+- `diff_laser.py` - 차분 이미지 레이저 검출
+- `generate_diff_dataset.py` - YOLO 학습 데이터셋 생성
+- `rate_image.py` - 비율 기반 이미지 분석
+- `undistort_gui.py` - 왜곡 보정 GUI 도구
+- `view_diff.py` - 차분 이미지 뷰어
+
+**변경 사항:**
+- ✅ 파일명 통일 (`diff_filter_*` 패턴)
+- ✅ 중복/구형 파일 제거 (4개)
+- ✅ 기능별 분류 명확화
+
+### 🔒 리팩토링 원칙
+
+1. **작업 위치 엄수**: `Refactoring/` 폴더만 수정
+2. **원본 보존**: `Com/`, `Raspberrypi/`, `Server/` 절대 수정 금지
+3. **기능 보장**: 모든 기능 유지 또는 개선 (저하 없음)
+
+### 🎯 검증 완료
+
+- ✅ **스레드 안전성**: 전체 시스템 스레딩 분석 완료
+- ✅ **코드 품질**: 미사용 코드 제거, 중복 최소화
+- ✅ **기능 테스트**: 원본과 동일하게 작동
+- ✅ **메모리/성능**: 영향 없음
 
 ---
 
 ## 🔬 향후 개선 사항
 
 ### 연구 필요
-1. **레이저 조준 알고리즘**
-   - 1차 조준 후 레이저 깜빡임으로 픽셀 차이 보정
-   - 피드백 루프 기반 정밀도 향상
 
-2. **다중 객체 인식**
+1. **다중 객체 인식**
    - 여러 개의 반사판 동시 추적
    - 우선순위 기반 타겟 선택
 
-### 알려진 문제
-- ⚠️ **거리 제한**: 먼 거리에서 반사 성능 저하
-- ⚠️ **각도 민감도**: 스캔 각도에 따라 인식률 변동
+2. **무선 전력 전송 효율 확인**
+- 솔라 셀에 전압, 전류계 로 효율 확인
 
 ---
 
@@ -281,11 +374,3 @@ PTCamera_waveshare/
 - Repository: [PTCamera_waveshare](https://github.com/leontnhaps/PTCamera_waveshare)
 
 ---
-
-<p align="center">
-  <i>광학 무선 전력 전송 시스템을 위한 자동 타겟팅 솔루션</i>
-</p>
-
-<p align="center">
-  Made with ❤️ for Optical WPT Research
-</p>
