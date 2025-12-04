@@ -122,6 +122,30 @@ def predict_with_tiling(model, img, rows=2, cols=3, overlap=0.15, conf=0.25, iou
     return final_boxes, final_scores, final_classes
 # =======================================
 
+# ========== Configuration Constants ==========
+# Hardware Limits
+PAN_MIN = -180
+PAN_MAX = 180
+TILT_MIN = -30
+TILT_MAX = 90
+
+# Control Parameters
+CENTERING_GAIN_PAN = 0.02
+CENTERING_GAIN_TILT = 0.02
+ANGLE_DELTA_MAX = 5.0
+POLL_INTERVAL_MS = 60
+
+# YOLO Parameters
+YOLO_CONF_THRESHOLD = 0.20
+YOLO_IOU_THRESHOLD = 0.45
+YOLO_TILE_ROWS = 2
+YOLO_TILE_COLS = 3
+YOLO_TILE_OVERLAP = 0.15
+
+# LED/Laser Timing
+LED_SETTLE_DEFAULT = 0.5  # seconds
+# ============================================
+
 SERVER_HOST = "127.0.0.1"
 GUI_CTRL_PORT = 7600
 GUI_IMG_PORT  = 7601
@@ -190,6 +214,418 @@ class GuiImgClient(threading.Thread):
         except Exception as e:
             ui_q.put(("toast", f"IMG err: {e}"))
 
+# ---- Image Processing ----
+class ImageProcessor:
+    """Handles image loading and undistortion with CUDA/Torch acceleration"""
+    
+    def __init__(self):
+        # Calibration data
+        self._ud_model = None
+        self._ud_K = None
+        self._ud_D = None
+        self._ud_img_size = None
+        self._ud_src_size = None
+        
+        # CPU undistortion maps
+        self._ud_m1 = None
+        self._ud_m2 = None
+        
+        # CUDA support
+        self._use_cv2_cuda = False
+        try:
+            self._use_cv2_cuda = hasattr(cv2, "cuda") and cv2.cuda.getCudaEnabledDeviceCount() > 0
+        except Exception:
+            self._use_cv2_cuda = False
+        self._ud_gm1 = None
+        self._ud_gm2 = None
+        
+        # Torch support
+        self._torch_available = _TORCH_AVAILABLE
+        self._torch_cuda = bool(_TORCH_AVAILABLE and torch.cuda.is_available())
+        self._torch_device = torch.device("cuda") if self._torch_cuda else torch.device("cpu") if _TORCH_AVAILABLE else None
+        self._torch_use_fp16 = False
+        self._torch_dtype = (torch.float16 if (self._torch_cuda and self._torch_use_fp16) else torch.float32) if _TORCH_AVAILABLE else None
+        self._ud_torch_grid = None
+        self._ud_torch_grid_wh = None
+        
+        # Alpha for getOptimalNewCameraMatrix
+        self.alpha = 0.0
+    
+    def load_calibration(self, path):
+        """Load camera calibration from npz file"""
+        try:
+            cal = np.load(str(path), allow_pickle=True)
+            self._ud_model = str(cal["model"])
+            self._ud_K = cal["K"].astype(np.float32)
+            self._ud_D = cal["D"].astype(np.float32)
+            self._ud_img_size = tuple(int(x) for x in cal["img_size"])
+            self._ud_src_size = None
+            self._ud_m1 = self._ud_m2 = None
+            self._ud_gm1 = self._ud_gm2 = None
+            self._ud_torch_grid = None
+            self._ud_torch_grid_wh = None
+            print(f"[ImageProcessor] Loaded: model={self._ud_model}, img_size={self._ud_img_size}, cv2.cuda={self._use_cv2_cuda}, torch={self._torch_cuda}")
+            return True
+        except Exception as e:
+            print(f"[ImageProcessor] Load failed: {e}")
+            return False
+    
+    def has_calibration(self):
+        """Check if calibration is loaded"""
+        return self._ud_K is not None
+    
+    def _scale_K(self, K, sx, sy):
+        """Scale camera matrix K"""
+        K2 = K.copy()
+        K2[0,0] *= sx
+        K2[1,1] *= sy
+        K2[0,2] *= sx
+        K2[1,2] *= sy
+        K2[2,2] = 1.0
+        return K2
+    
+    def _ensure_ud_maps(self, w: int, h: int):
+        """Ensure undistortion maps are created for given size"""
+        if self._ud_K is None or self._ud_D is None or self._ud_model is None:
+            return
+        if self._ud_src_size == (w, h) and self._ud_m1 is not None:
+            return
+        
+        Wc, Hc = self._ud_img_size
+        sx, sy = w / float(Wc), h / float(Hc)
+        K = self._scale_K(self._ud_K, sx, sy)
+        D = self._ud_D
+        a = float(self.alpha)
+        
+        if self._ud_model == "pinhole":
+            newK, _ = cv2.getOptimalNewCameraMatrix(K, D, (w, h), alpha=a, newImgSize=(w, h))
+            self._ud_m1, self._ud_m2 = cv2.initUndistortRectifyMap(
+                K, D, None, newK, (w, h), cv2.CV_32FC1
+            )
+        elif self._ud_model == "fisheye":
+            newK = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
+                K, D, (w, h), None, balance=a
+            )
+            self._ud_m1, self._ud_m2 = cv2.fisheye.initUndistortRectifyMap(
+                K, D, None, newK, (w, h), cv2.CV_32FC1
+            )
+        
+        self._ud_src_size = (w, h)
+        
+        # CUDA maps
+        if self._use_cv2_cuda and self._ud_m1 is not None:
+            try:
+                self._ud_gm1 = cv2.cuda_GpuMat()
+                self._ud_gm2 = cv2.cuda_GpuMat()
+                self._ud_gm1.upload(self._ud_m1)
+                self._ud_gm2.upload(self._ud_m2)
+            except Exception as e:
+                print(f"[ImageProcessor] CUDA upload failed: {e}")
+                self._ud_gm1 = self._ud_gm2 = None
+    
+    def _ensure_torch_grid(self, h: int, w: int):
+        """Ensure torch grid for GPU undistortion"""
+        if not self._torch_available:
+            return
+        if self._ud_torch_grid is not None and self._ud_torch_grid_wh == (w, h):
+            return
+        
+        self._ensure_ud_maps(w, h)
+        if self._ud_m1 is None:
+            return
+        
+        import torch
+        import torch.nn.functional as F
+        
+        m1_t = torch.from_numpy(self._ud_m1).float()
+        m2_t = torch.from_numpy(self._ud_m2).float()
+        
+        grid_x = (m1_t / (w - 1)) * 2 - 1
+        grid_y = (m2_t / (h - 1)) * 2 - 1
+        self._ud_torch_grid = torch.stack([grid_x, grid_y], dim=-1).unsqueeze(0)
+        
+        if self._torch_cuda:
+            self._ud_torch_grid = self._ud_torch_grid.to(self._torch_device)
+        
+        self._ud_torch_grid_wh = (w, h)
+    
+    def undistort(self, img, use_torch=False):
+        """Undistort a BGR image using best available method"""
+        if self._ud_K is None or img is None:
+            return img
+        
+        h, w = img.shape[:2]
+        
+        # Torch acceleration (fastest)
+        if use_torch and self._torch_available and self._torch_cuda:
+            return self._undistort_torch(img, h, w)
+        
+        # CUDA acceleration
+        if self._use_cv2_cuda:
+            return self._undistort_cuda(img, w, h)
+        
+        # CPU fallback
+        self._ensure_ud_maps(w, h)
+        if self._ud_m1 is None:
+            return img
+        return cv2.remap(img, self._ud_m1, self._ud_m2, cv2.INTER_LINEAR)
+    
+    def _undistort_cuda(self, img, w, h):
+        """Undistort using CUDA"""
+        self._ensure_ud_maps(w, h)
+        if self._ud_gm1 is None:
+            return img
+        
+        try:
+            gpu_src = cv2.cuda_GpuMat()
+            gpu_src.upload(img)
+            gpu_dst = cv2.cuda.remap(gpu_src, self._ud_gm1, self._ud_gm2, cv2.INTER_LINEAR)
+            return gpu_dst.download()
+        except Exception as e:
+            print(f"[ImageProcessor] CUDA remap failed: {e}")
+            return cv2.remap(img, self._ud_m1, self._ud_m2, cv2.INTER_LINEAR)
+    
+    def _undistort_torch(self, img, h, w):
+        """Undistort using Torch"""
+        import torch
+        import torch.nn.functional as F
+        
+        self._ensure_torch_grid(h, w)
+        if self._ud_torch_grid is None:
+            return img
+        
+        try:
+            # BGR -> RGB, HWC -> CHW
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            img_t = torch.from_numpy(img_rgb).permute(2, 0, 1).unsqueeze(0).to(
+                dtype=self._torch_dtype, device=self._torch_device
+            )
+            img_t = img_t / 255.0
+            
+            out_t = F.grid_sample(img_t, self._ud_torch_grid, mode='bilinear', 
+                                  padding_mode='border', align_corners=True)
+            
+            out_t = (out_t * 255.0).clamp(0, 255).squeeze(0).permute(1, 2, 0)
+            out_np = out_t.cpu().to(torch.uint8).numpy()
+            out_bgr = cv2.cvtColor(out_np, cv2.COLOR_RGB2BGR)
+            return out_bgr
+        except Exception as e:
+            print(f"[ImageProcessor] Torch undistort failed: {e}")
+            return self.undistort(img, use_torch=False)
+    
+    def undistort_pair(self, img_on, img_off, use_torch=False):
+        """Undistort a pair of images"""
+        if self._ud_K is None:
+            return img_on, img_off
+        img_on = self.undistort(img_on, use_torch=use_torch)
+        img_off = self.undistort(img_off, use_torch=use_torch)
+        return img_on, img_off
+    
+    def load_image(self, path):
+        """Load image from file"""
+        try:
+            nparr = np.fromfile(str(path), np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            return img
+        except Exception as e:
+            print(f"[ImageProcessor] Image load error: {e}")
+            return None
+    
+    def load_image_pair(self, path_on, path_off):
+        """Load a pair of images"""
+        img_on = self.load_image(path_on)
+        img_off = self.load_image(path_off)
+        return img_on, img_off
+
+# ---- YOLO Processing ----
+class YOLOProcessor:
+    """Handles YOLO model loading and caching"""
+    
+    def __init__(self):
+        self._cached_model = None
+        self._cached_path = None
+    
+    def get_model(self, weights_path):
+        """Get YOLO model with caching"""
+        if not _YOLO_OK:
+            return None
+        
+        # Return cached model if path matches
+        if self._cached_model is not None and self._cached_path == weights_path:
+            return self._cached_model
+        
+        # Load new model
+        try:
+            self._cached_model = YOLO(weights_path)
+            self._cached_path = weights_path
+            print(f"[YOLOProcessor] Loaded model: {weights_path}")
+            return self._cached_model
+        except Exception as e:
+            print(f"[YOLOProcessor] Load failed: {e}")
+            return None
+    
+    def get_device(self):
+        """Get available device for inference"""
+        if not _TORCH_AVAILABLE:
+            return "cpu"
+        import torch
+        return "cuda" if torch.cuda.is_available() else "cpu"
+
+# ---- Scan Processing ----
+class ScanController:
+    """실시간 스캔 처리 관리자 - Real-time scan processing with immediate YOLO detection"""
+    
+    def __init__(self, image_processor, yolo_processor, output_dir):
+        self.image_processor = image_processor
+        self.yolo_processor = yolo_processor
+        self.output_dir = output_dir
+        
+        # Scan state
+        self.is_scanning = False
+        self.yolo_weights_path = None
+        
+        # Real-time processing buffer: (pan, tilt) -> {'on': img_ud, 'off': img_ud}
+        self.image_pairs = {}
+        
+        # CSV writer
+        self.csv_writer = None
+        self.csv_file = None
+        self.csv_path = None
+        
+        # Statistics
+        self.processed_count = 0
+        self.detected_count = 0
+    
+    def start_scan(self, session_name, yolo_path):
+        """Start scan - create CSV file"""
+        self.is_scanning = True
+        self.yolo_weights_path = yolo_path
+        self.image_pairs.clear()
+        self.processed_count = 0
+        self.detected_count = 0
+        
+        # Create CSV file
+        self.csv_path = self.output_dir / f"{session_name}_detections.csv"
+        try:
+            self.csv_file = open(self.csv_path, "w", newline="", encoding="utf-8")
+            self.csv_writer = csv.writer(self.csv_file)
+            self.csv_writer.writerow(["pan_deg", "tilt_deg", "cx", "cy", "w", "h", "conf", "cls", "W", "H"])
+            print(f"[ScanController] CSV created: {self.csv_path}")
+            return True
+        except Exception as e:
+            print(f"[ScanController] CSV creation failed: {e}")
+            self.csv_file = None
+            self.csv_writer = None
+            return False
+    
+    def on_image_received(self, name, data):
+        """Process received image"""
+        # Save to file (existing feature)
+        file_path = self.output_dir / name
+        try:
+            with open(file_path, 'wb') as f:
+                f.write(data)
+        except Exception as e:
+            print(f"[ScanController] File save failed: {e}")
+        
+        # Parse pan/tilt from filename: "img_t045_p090_..._led_on.jpg"
+        match = re.search(r't([+-]?\d+)_p([+-]?\d+)', name)
+        if not match:
+            return data  # Return for preview
+        
+        tilt = int(match.group(1))
+        pan = int(match.group(2))
+        
+        # Real-time processing (if scanning)
+        if self.is_scanning:
+            self._process_realtime(name, data, pan, tilt)
+        
+        return data  # Return for preview
+    
+    def _process_realtime(self, name, data, pan, tilt):
+        """Real-time processing: undistort → buffer → YOLO when pair complete"""
+        # Decode image
+        try:
+            img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+            if img is None:
+                return
+        except Exception as e:
+            print(f"[ScanController] Image decode failed: {e}")
+            return
+        
+        # Undistort
+        img_ud = self.image_processor.undistort(img, use_torch=True)
+        
+        # Store in buffer
+        key = (pan, tilt)
+        if 'led_on' in name:
+            self.image_pairs.setdefault(key, {})['on'] = img_ud
+        elif 'led_off' in name:
+            self.image_pairs.setdefault(key, {})['off'] = img_ud
+        
+        # Check if pair is complete
+        pair = self.image_pairs.get(key, {})
+        if 'on' in pair and 'off' in pair:
+            self._process_pair(pan, tilt, pair)
+            del self.image_pairs[key]  # Free memory
+    
+    def _process_pair(self, pan, tilt, pair):
+        """Process complete pair: diff → YOLO → CSV"""
+        try:
+            # Calculate difference
+            diff = cv2.absdiff(pair['on'], pair['off'])
+            H, W = diff.shape[:2]
+            
+            # YOLO detection
+            model = self.yolo_processor.get_model(self.yolo_weights_path)
+            if model is None:
+                return
+            
+            device = self.yolo_processor.get_device()
+            boxes, scores, classes = predict_with_tiling(
+                model, diff,
+                rows=YOLO_TILE_ROWS, cols=YOLO_TILE_COLS,
+                overlap=YOLO_TILE_OVERLAP,
+                conf=YOLO_CONF_THRESHOLD, iou=YOLO_IOU_THRESHOLD,
+                device=device
+            )
+            
+            # Write to CSV
+            if boxes and self.csv_writer:
+                for i, (x, y, w, h) in enumerate(boxes):
+                    self.csv_writer.writerow([
+                        pan, tilt, x+w/2, y+h/2, w, h,
+                        float(scores[i]), int(classes[i]), W, H
+                    ])
+                    self.detected_count += 1
+                self.csv_file.flush()  # Immediate write to disk
+            
+            self.processed_count += 1
+            
+        except Exception as e:
+            print(f"[ScanController] Pair processing failed ({pan}, {tilt}): {e}")
+    
+    def stop_scan(self):
+        """Stop scan - close CSV"""
+        self.is_scanning = False
+        
+        if self.csv_file:
+            self.csv_file.close()
+            self.csv_file = None
+            self.csv_writer = None
+        
+        print(f"[ScanController] Scan stopped. Processed: {self.processed_count}, Detected: {self.detected_count}")
+        
+        # Clear buffer
+        self.image_pairs.clear()
+        
+        return {
+            'csv_path': self.csv_path,
+            'processed': self.processed_count,
+            'detected': self.detected_count
+        }
+
+# ---- GUI Components ----
 class ScrollFrame(Frame):
     def __init__(self, master, *args, **kwargs):
         super().__init__(master, *args, **kwargs)
@@ -236,44 +672,23 @@ class App:
         self.tkimg=None
         self._resume_preview_after_snap = False
 
-        # undistort state
+
+        # Image processing (undistortion, loading)
+        self.image_processor = ImageProcessor()
         self.ud_enable    = BooleanVar(value=True)
         self.ud_save_copy = BooleanVar(value=True)
         self.ud_alpha     = DoubleVar(value=0.0)
 
-        self._ud_model = None
-        self._ud_K = self._ud_D = None
-        self._ud_img_size = None
-        self._ud_src_size = None
-        self._ud_m1 = self._ud_m2 = None
+        # YOLO processing (model loading, caching)
+        self.yolo_processor = YOLOProcessor()
+        self.yolo_wpath = StringVar(value="yolov11m_diff.pt")
+        self._scan_yolo_conf = 0.50
+        self._scan_yolo_imgsz = 832
+        
+        # Scan processing (real-time YOLO detection)
+        self.scan_controller = ScanController(self.image_processor, self.yolo_processor, DEFAULT_OUT_DIR)
 
-        # cv2 CUDA 가능 여부
-        self._use_cv2_cuda = False
-        try:
-            self._use_cv2_cuda = hasattr(cv2, "cuda") and cv2.cuda.getCudaEnabledDeviceCount() > 0
-        except Exception:
-            self._use_cv2_cuda = False
-        self._ud_gm1 = self._ud_gm2 = None
-
-        # ==== Torch 가속 관련 멤버 ====
-        self._torch_available = _TORCH_AVAILABLE
-        self._torch_cuda = bool(_TORCH_AVAILABLE and torch.cuda.is_available())
-        self._torch_device = torch.device("cuda") if self._torch_cuda else torch.device("cpu") if _TORCH_AVAILABLE else None
-        # 미리보기/저장 용도는 FP16로 충분. 안전하게 FP32로 시작하고, 성능 더 뽑고 싶으면 True.
-        self._torch_use_fp16 = False
-        self._torch_dtype = (torch.float16 if (self._torch_cuda and self._torch_use_fp16) else torch.float32) if _TORCH_AVAILABLE else None
-
-        self._ud_torch_grid = None      # 1xHxWx2
-        self._ud_torch_grid_wh = None   # (w,h)
-        # ===================================
-
-        # ==== YOLO 관련 변수 ====
-        self.yolo_wpath = StringVar(value="yolov11m_diff.pt")  # YOLO 가중치 경로
-        self._scan_yolo_conf = 0.50  # YOLO confidence threshold
-        self._scan_yolo_imgsz = 832  # YOLO image size
-        # ========================
-
-        print(f"[INFO] cv2.cuda={self._use_cv2_cuda}, torch_cuda={self._torch_cuda}")
+        print(f"[INFO] cv2.cuda={self.image_processor._use_cv2_cuda}, torch_cuda={self.image_processor._torch_cuda}")
 
         # top bar
         top = Frame(root); top.pack(fill="x", padx=10, pady=6)
@@ -399,7 +814,7 @@ class App:
 
         # ==================
 
-        self.root.after(60, self._poll)
+        self.root.after(POLL_INTERVAL_MS, self._poll)
                 # ===== [SCAN CSV 로깅 상태] =====
         self._scan_csv_path = None
         self._scan_csv_file = None
@@ -544,126 +959,88 @@ class App:
         if pathlib.Path("calib.npz").exists():
             self.load_npz("calib.npz")
 
+        # [NEW] Auto-load YOLO model if exists
+        yolo_path = pathlib.Path(self.yolo_wpath.get())
+        if yolo_path.exists():
+            print(f"[YOLO] 자동 로드 시작: {yolo_path}")
+            self._get_yolo_model()  # 미리 캐싱
+
     def run(self):
         self.root.mainloop()
 
+    # ========== Helper Methods (Refactoring Phase 1) ==========
+    
+    def _send_snap_cmd(self, save_name: str, hard_stop: bool = False):
+        """Snap 명령 전송 헬퍼"""
+        self.ctrl.send({
+            "cmd": "snap",
+            "width": self.width.get(),
+            "height": self.height.get(),
+            "quality": self.quality.get(),
+            "save": save_name,
+            "hard_stop": hard_stop
+        })
+
+    def _get_yolo_model(self):
+        """YOLO 모델 캐싱 - delegates to YOLOProcessor"""
+        wpath = self.yolo_wpath.get().strip()
+        if not wpath:
+            return None
+        return self.yolo_processor.get_model(wpath)
+
+    def _undistort_pair(self, img_on, img_off):
+        """이미지 쌍 Undistort 헬퍼 - delegates to ImageProcessor"""
+        self.image_processor.alpha = float(self.ud_alpha.get())
+        return self.image_processor.undistort_pair(img_on, img_off, use_torch=True)
+
+    def _calculate_angle_delta(self, err_x: float, err_y: float, 
+                               k_pan: float = CENTERING_GAIN_PAN, k_tilt: float = CENTERING_GAIN_TILT):
+        """픽셀 오차 → 각도 변환 (클램핑 포함)"""
+        d_pan = err_x * k_pan
+        d_tilt = -err_y * k_tilt
+        max_step = self.centering_max_step.get()
+        d_pan = max(min(d_pan, max_step), -max_step)
+        d_tilt = max(min(d_tilt, max_step), -max_step)
+        return d_pan, d_tilt
+
+    def _load_image_from_file(self, path):
+        """파일에서 이미지 로드 - delegates to ImageProcessor"""
+        return self.image_processor.load_image(path)
+
+    def _load_image_pair(self, path_on, path_off):
+        """ON/OFF 이미지 쌍 로드 - delegates to ImageProcessor"""
+        return self.image_processor.load_image_pair(path_on, path_off)
+
+    def _get_device(self):
+        """YOLO/Torch 디바이스 반환 - delegates to YOLOProcessor"""
+        return self.yolo_processor.get_device()
+
+    # ========== End of Helper Methods ==========
+
     def load_npz(self, path=None):
+        """Load calibration file and delegate to ImageProcessor"""
         if path is None:
             path = filedialog.askopenfilename(filetypes=[("NPZ","*.npz")])
-        if not path: return
-        try:
-            cal = np.load(path, allow_pickle=True)
-            self._ud_model = str(cal["model"])
-            self._ud_K = cal["K"].astype(np.float32)
-            self._ud_D = cal["D"].astype(np.float32)
-            self._ud_img_size = tuple(int(x) for x in cal["img_size"])
-            self._ud_src_size = None
-            self._ud_m1 = self._ud_m2 = None
-            self._ud_gm1 = self._ud_gm2 = None
-            self._ud_torch_grid = None
-            self._ud_torch_grid_wh = None
-            print(f"[UD] loaded calib: model={self._ud_model}, img_size={self._ud_img_size}, cv2.cuda={self._use_cv2_cuda}, torch_cuda={self._torch_cuda}")
-        except Exception as e:
-            print(f"[UD] Load failed: {e}")
-
-    def _scale_K(self, K, sx, sy):
-        K2 = K.copy()
-        K2[0,0]*=sx; K2[1,1]*=sy
-        K2[0,2]*=sx; K2[1,2]*=sy
-        K2[2,2]=1.0
-        return K2
-
-    def _ensure_ud_maps(self, w:int, h:int):
-        if self._ud_K is None or self._ud_D is None or self._ud_model is None:
+        if not path:
             return
-        if self._ud_src_size == (w,h) and self._ud_m1 is not None:
-            return
-        Wc,Hc = self._ud_img_size
-        sx, sy = w/float(Wc), h/float(Hc)
-        K = self._scale_K(self._ud_K, sx, sy)
-        D = self._ud_D
-        a = float(self.ud_alpha.get())
-
-        if self._ud_model == "pinhole":
-            newK, _ = cv2.getOptimalNewCameraMatrix(K, D, (w,h), alpha=a, newImgSize=(w,h))
-            m1,m2 = cv2.initUndistortRectifyMap(K, D, None, newK, (w,h), cv2.CV_16SC2)
+        
+        # Update ImageProcessor's alpha from UI
+        self.image_processor.alpha = float(self.ud_alpha.get())
+        
+        # Delegate to ImageProcessor
+        success = self.image_processor.load_calibration(path)
+        if success:
+            print(f"[App] Calibration loaded successfully")
         else:
-            R = np.eye(3, dtype=np.float32)
-            newK = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
-                K, D, (w,h), R, balance=a, new_size=(w,h)
-            )
-            m1,m2 = cv2.fisheye.initUndistortRectifyMap(K, D, R, newK, (w,h), cv2.CV_16SC2)
+            print(f"[App] Calibration load failed")
 
-        self._ud_m1, self._ud_m2 = m1, m2
-        self._ud_src_size = (w,h)
 
-        # cv2.cuda 맵 업로드 (가능하면)
-        if self._use_cv2_cuda:
-            try:
-                self._ud_gm1 = cv2.cuda_GpuMat(); self._ud_gm1.upload(self._ud_m1)
-                self._ud_gm2 = cv2.cuda_GpuMat(); self._ud_gm2.upload(self._ud_m2)
-            except Exception as e:
-                print("[UD][cv2.cuda] map upload failed:", e)
-                self._ud_gm1 = self._ud_gm2 = None
-
-        # [NEW] Torch grid 초기화 무효화 (재생성 필요)
-        self._ud_torch_grid = None
-        self._ud_torch_grid_wh = None
-
-    # [NEW] OpenCV 맵 -> Torch grid(-1~1 정규화)로 변환/캐시
-    def _ensure_torch_grid(self, w:int, h:int):
-        if not (self._torch_cuda and self._ud_m1 is not None):
-            return
-        if self._ud_torch_grid is not None and self._ud_torch_grid_wh == (w,h):
-            return
-
-        mx, my = cv2.convertMaps(self._ud_m1, self._ud_m2, cv2.CV_32F)  # HxW float32
-        H, W = mx.shape
-        gx = (mx / max(W-1,1)) * 2.0 - 1.0
-        gy = (my / max(H-1,1)) * 2.0 - 1.0
-        grid = np.stack([gx, gy], axis=-1)  # HxWx2
-
-        dtype = self._torch_dtype
-        dev   = self._torch_device
-        self._ud_torch_grid = torch.from_numpy(grid).unsqueeze(0).to(device=dev, dtype=dtype)
-        self._ud_torch_grid_wh = (w,h)
-
-    # [NEW] 단일 프레임 왜곡보정 (우선순위: Torch→cv2.cuda→CPU)
     def _undistort_bgr(self, bgr: np.ndarray) -> np.ndarray:
-        h,w = bgr.shape[:2]
-        self._ensure_ud_maps(w,h)
-
-        # Torch CUDA 경로
-        if self._torch_cuda and self._ud_m1 is not None:
-            try:
-                self._ensure_torch_grid(w,h)
-                if self._ud_torch_grid is not None:
-                    # np -> torch (CHW, [0,1] float)
-                    t_cpu = torch.from_numpy(bgr).permute(2,0,1).contiguous()
-                    # pinned memory 전송(속도 미세 향상)
-                    try:
-                        t_cpu = t_cpu.pin_memory()
-                    except Exception:
-                        pass
-                    t = t_cpu.to(self._torch_device, dtype=self._torch_dtype, non_blocking=True).unsqueeze(0) / 255.0
-                    out = F.grid_sample(t, self._ud_torch_grid, mode="bilinear", align_corners=True)
-                    bgr = (out.squeeze(0).permute(1,2,0) * 255.0).clamp(0,255).byte().cpu().numpy()
-                    return np.ascontiguousarray(bgr)
-            except Exception as e:
-                print("[UD][torch] remap failed → fallback:", e)
-
-        # cv2 CUDA 경로
-        if self._use_cv2_cuda and self._ud_gm1 is not None and self._ud_gm2 is not None:
-            try:
-                gsrc = cv2.cuda_GpuMat(); gsrc.upload(bgr)
-                gout = cv2.cuda.remap(gsrc, self._ud_gm1, self._ud_gm2,
-                                      interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
-                return gout.download()
-            except Exception as e:
-                print("[UD][cv2.cuda] remap failed → CPU:", e)
-
-        # CPU 경로
-        return cv2.remap(bgr, self._ud_m1, self._ud_m2, cv2.INTER_LINEAR)
+        """Undistort BGR image - delegates to ImageProcessor"""
+        # Update alpha before undistortion
+        self.image_processor.alpha = float(self.ud_alpha.get())
+        # Use Torch acceleration if available for best performance
+        return self.image_processor.undistort(bgr, use_torch=True)
 
     # helpers
 
@@ -707,7 +1084,7 @@ class App:
     # actions
     def start_scan(self):
     # 보정 강제: calib.npz가 로드되지 않았으면 스캔 시작 금지
-        if self._ud_K is None or self._ud_D is None:
+        if not self.image_processor.has_calibration():
             ui_q.put(("toast", "❌ 스캔은 보정 이미지만 허용합니다. 먼저 'Load calib.npz'를 해주세요."))
             return
         if self.preview_enable.get():
@@ -787,76 +1164,32 @@ class App:
             self.ctrl.send({"cmd":"preview","enable": False})
             self._resume_preview_after_snap = True
         fname = datetime.now().strftime("snap_%Y%m%d_%H%M%S.jpg")
-        self.ctrl.send({
-            "cmd":"snap",
-            "width":  self.width.get(),
-            "height": self.height.get(),
-            "quality":self.quality.get(),
-            "save":   fname,
-            "hard_stop": self.hard_stop.get()
-        })
+        self._send_snap_cmd(fname, self.hard_stop.get())
 
     # event loop
     # ==== [NEW] Centering Mode Logic ====
-    def _start_centering_cycle(self):
-        # 1. LED ON
-        self._centering_state = 1 # WAIT_ON
-        self.ctrl.send({"cmd":"led", "value":255})
-        # Settle time wait -> Snap
-        wait_ms = int(self.led_settle.get() * 1000)
-        self.root.after(wait_ms, self._snap_center_on)
-
-    def _snap_center_on(self):
-        # 2. Snap ON image
-        # save="center_on.jpg"로 요청하여 _poll에서 식별
-        self.ctrl.send({
-            "cmd":"snap",
-            "width":  self.width.get(),
-            "height": self.height.get(),
-            "quality":self.quality.get(),
-            "save":   "center_on.jpg",
-            "hard_stop": False
-        })
+    # (_start_centering_cycle and _snap_center_on are defined later - removed duplicate)
 
     def _snap_center_off(self):
         # 4. Snap OFF image
-        self.ctrl.send({
-            "cmd":"snap",
-            "width":  self.width.get(),
-            "height": self.height.get(),
-            "quality":self.quality.get(),
-            "save":   "center_off.jpg",
-            "hard_stop": False
-        })
+        self._send_snap_cmd("center_off.jpg", False)
 
     def _run_centering_logic(self, img_on, img_off):
         """백그라운드 스레드에서 실행되는 Centering 핵심 로직"""
         try:
-            # 1. Undistort
-            if self._ud_K is not None:
-                img_on = self._undistort_bgr(img_on)
-                img_off = self._undistort_bgr(img_off)
+            # 1. Undistort (use helper)
+            img_on, img_off = self._undistort_pair(img_on, img_off)
             
             # 2. Diff
             diff = cv2.absdiff(img_on, img_off)
             
-            # 3. YOLO (Tiling)
-            if not _YOLO_OK:
-                ui_q.put(("toast", "❌ YOLO 없음"))
+            # 3. YOLO (Tiling) - use cached model
+            model = self._get_yolo_model()
+            if model is None:
+                ui_q.put(("toast", "❌ YOLO 모델 없음"))
                 return
             
-            yolo_wpath = self.yolo_wpath.get().strip()
-            if not yolo_wpath:
-                ui_q.put(("toast", "⚠️ YOLO 가중치 없음"))
-                return
-                
-            # 모델 로드 (매번 로드하면 느리지만, 스레드 안전성을 위해.. 
-            # 혹은 self.yolo_model을 캐싱해서 써야 함. 여기서는 매번 로드하거나 캐싱 고려)
-            # 성능을 위해 전역/멤버 변수로 모델을 유지하는게 좋음.
-            # 하지만 간단히 하기 위해 여기서 로드 (또는 App에 캐싱된거 사용)
-            # App에 캐싱된게 없으므로 로드. (속도 문제시 개선 필요)
-            model = YOLO(yolo_wpath) 
-            device = "cuda" if (torch and torch.cuda.is_available()) else "cpu"
+            device = self._get_device()
             
             # conf=0.20, iou=0.45
             boxes, scores, classes = predict_with_tiling(
@@ -908,30 +1241,8 @@ class App:
             else:
                 self._centering_stable_cnt = 0
                 
-                # 7. 이동 (Move)
-                # 픽셀 오차 -> 각도 변환
-                # _fits_h, _fits_v 데이터가 있으면 사용, 없으면 대략적인 비례상수 사용
-                # 대략: 2592px ~= 60도? (FOV에 따라 다름)
-                # 일단 단순 비례 제어 (P-control)
-                # FOV가 약 60도라고 가정하면, 1px ~= 0.023도
-                # 하지만 정확히 하기 위해 fits 데이터가 있으면 좋음.
-                
-                # 여기서는 간단히 고정 게인 사용 (사용자가 max_step으로 제한하므로 안전)
-                # err_x > 0 이면 객체가 오른쪽에 있음 -> 카메라를 오른쪽(Pan +)으로 돌려야 함
-                # err_y > 0 이면 객체가 아래쪽에 있음 -> 카메라를 아래쪽(Tilt -)으로 돌려야 함 (Tilt 좌표계 확인 필요)
-                # 보통 Tilt +가 위쪽이면, 아래에 있는 객체를 보려면 Tilt를 줄여야 함.
-                
-                # 게인 (튜닝 필요)
-                k_pan = 0.02 
-                k_tilt = 0.02 
-                
-                d_pan = err_x * k_pan
-                d_tilt = -err_y * k_tilt # Tilt 방향 주의
-                
-                # Max step 제한
-                max_step = self.centering_max_step.get()
-                d_pan = max(min(d_pan, max_step), -max_step)
-                d_tilt = max(min(d_tilt, max_step), -max_step)
+                # 7. 이동 (Move) - use helper for angle calculation
+                d_pan, d_tilt = self._calculate_angle_delta(err_x, err_y)
                 
                 # 현재 위치 추정 (명령 기준)
                 # self._curr_pan, self._curr_tilt 사용
@@ -979,17 +1290,11 @@ class App:
         self._centering_state = 1 # WAIT_ON
         self.ctrl.send({"cmd":"led", "value":255})
         wait_ms = int(self.led_settle.get() * 1000)
-        self.root.after(wait_ms, lambda: self.ctrl.send({
-            "cmd":"snap", "width":self.width.get(), "height":self.height.get(),
-            "quality":self.quality.get(), "save":"center_on.jpg", "hard_stop":False
-        }))
+        self.root.after(wait_ms, lambda: self._send_snap_cmd("center_on.jpg", False))
 
     def _snap_center_off(self):
         if not self.centering_enable.get(): return
-        self.ctrl.send({
-            "cmd":"snap", "width":self.width.get(), "height":self.height.get(),
-            "quality":self.quality.get(), "save":"center_off.jpg", "hard_stop":False
-        })
+        self._send_snap_cmd("center_off.jpg", False)
 
     def _find_laser_center(self, img_on, img_off, roi_size=200):
         h, w = img_on.shape[:2]
@@ -1032,9 +1337,7 @@ class App:
 
     def _run_pointing_laser_logic(self, img_on, img_off):
         try:
-            if self._ud_K is not None:
-                img_on = self._undistort_bgr(img_on)
-                img_off = self._undistort_bgr(img_off)
+            img_on, img_off = self._undistort_pair(img_on, img_off)
             
             laser_pos = self._find_laser_center(img_on, img_off, self.pointing_roi_size.get())
             
@@ -1064,21 +1367,18 @@ class App:
 
     def _run_pointing_object_logic(self, img_on, img_off):
         try:
-            if self._ud_K is not None:
-                img_on = self._undistort_bgr(img_on)
-                img_off = self._undistort_bgr(img_off)
+            img_on, img_off = self._undistort_pair(img_on, img_off)
             
             diff = cv2.absdiff(img_on, img_off)
             
-            if not _YOLO_OK:
+            model = self._get_yolo_model()
+            if model is None:
                 ui_q.put(("toast", "❌ YOLO 없음"))
                 self._pointing_state = 0; return
 
-            yolo_wpath = self.yolo_wpath.get().strip()
-            model = YOLO(yolo_wpath)
-            device = "cuda" if (torch and torch.cuda.is_available()) else "cpu"
+            device = self._get_device()
             
-            boxes, scores, classes = predict_with_tiling(model, diff, rows=2, cols=3, overlap=0.15, conf=0.20, iou=0.45, device=device)
+            boxes, scores, classes = predict_with_tiling(model, diff, rows=YOLO_TILE_ROWS, cols=YOLO_TILE_COLS, overlap=YOLO_TILE_OVERLAP, conf=YOLO_CONF_THRESHOLD, iou=YOLO_IOU_THRESHOLD, device=device)
             
             if not boxes:
                 ui_q.put(("toast", "⚠️ Object not found -> Retry"))
@@ -1148,13 +1448,7 @@ class App:
                 self._pointing_stable_cnt = 0
                 
                 # Move
-                k_pan = 0.02; k_tilt = 0.02
-                d_pan = err_x * k_pan
-                d_tilt = -err_y * k_tilt
-                
-                max_step = self.centering_max_step.get()
-                d_pan = max(min(d_pan, max_step), -max_step)
-                d_tilt = max(min(d_tilt, max_step), -max_step)
+                d_pan, d_tilt = self._calculate_angle_delta(err_x, err_y)
                 
                 next_pan = self._curr_pan + d_pan
                 next_tilt = self._curr_tilt + d_tilt
@@ -1175,275 +1469,259 @@ class App:
             ui_q.put(("toast", f"❌ Pointing Object Error: {e}"))
             self._pointing_state = 0
 
-    def _poll(self):
-        # [NEW] Centering Trigger Check
+
+    # ========== Event Handlers (Phase 2 Refactoring) ==========
+    
+    def _check_centering_trigger(self):
+        """Check and trigger centering cycle if needed"""
         if self.centering_enable.get() and self._centering_state == 0:
             now = time.time() * 1000
             if now - self._centering_last_ts > self.centering_cooldown.get():
                 self._start_centering_cycle()
-
-        # [NEW] Pointing Trigger Check
+    
+    def _check_pointing_trigger(self):
+        """Check and trigger pointing cycle if needed"""
         if self.pointing_enable.get() and self._pointing_state == 0:
             now = time.time() * 1000
             if now - self._pointing_last_ts > self.centering_cooldown.get():
                 self._start_pointing_cycle()
+    
+    def _handle_hello_event(self, evt):
+        """Handle server hello event"""
+        if self.preview_enable.get() and evt.get("agent_state") == "connected":
+            self.toggle_preview()
+    
+    def _handle_scan_start(self, evt):
+        """Handle scan start event - delegate to ScanController"""
+        total = int(evt.get("total", 0))
+        self.prog.configure(maximum=max(1, total), value=0)
+        self.prog_lbl.config(text=f"0 / {total}")
+        self.dl_lbl.config(text="DL 0")
+        self.last_lbl.config(text="Last: -")
+        
+        # Start ScanController
+        sess = evt.get("session") or datetime.now().strftime("scan_%Y%m%d_%H%M%S")
+        yolo_path = self.yolo_wpath.get()
+        success = self.scan_controller.start_scan(sess, yolo_path)
+        
+        if not success:
+            ui_q.put(("toast", "❌ CSV creation failed"))
+    
+    def _handle_scan_progress(self, evt):
+        """Handle scan progress update"""
+        done = int(evt.get("done", 0))
+        total = int(evt.get("total", 0))
+        if total > 0:
+            self.prog.configure(maximum=total)
+        self.prog.configure(value=done)
+        self.prog_lbl.config(text=f"{done} / {total}")
+        name = evt.get("name", "")
+        if name:
+            self.last_lbl.config(text=f"Last: {name}")
+    
+    def _handle_scan_done(self, evt):
+        """Handle scan completion - ScanController stops and reports results"""
+        # Stop ScanController
+        results = self.scan_controller.stop_scan()
+        
+        # Report results
+        csv_path = results.get('csv_path', 'unknown')
+        processed = results.get('processed', 0)
+        detected = results.get('detected', 0)
+        
+        ui_q.put(("toast", f"✅ 스캔 완료: {processed}개 처리, {detected}개 검출"))
+        ui_q.put(("toast", f"📄 CSV: {csv_path}"))
+        ui_q.put(("preview_on", None))
+    
+    def _handle_server_event(self, evt):
+        """Route server events to specific handlers"""
+        et = evt.get("event")
+        if et == "hello":
+            self._handle_hello_event(evt)
+        elif et == "start":
+            self._handle_scan_start(evt)
+        elif et == "progress":
+            self._handle_scan_progress(evt)
+        elif et == "done":
+            self._handle_scan_done(evt)
+    
+    def _handle_center_on_image(self, name, data):
+        """Handle centering ON image capture"""
+        if name == "center_on.jpg" and self._centering_state == 1:
+            try:
+                nparr = np.frombuffer(data, np.uint8)
+                self._centering_on_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                self._set_preview(data)
+                self._centering_state = 2
+                self.ctrl.send({"cmd": "led", "value": 0})
+                self.root.after(int(self.led_settle.get() * 1000), self._snap_center_off)
+            except:
+                self._centering_state = 0
+    
+    def _handle_center_off_image(self, name, data):
+        """Handle centering OFF image capture"""
+        if name == "center_off.jpg" and self._centering_state == 2:
+            try:
+                nparr = np.frombuffer(data, np.uint8)
+                self._centering_off_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                self._set_preview(data)
+                
+                if self._centering_on_img is not None and self._centering_off_img is not None:
+                    ui_q.put(("toast", "🚀 Centering Logic Start"))
+                    threading.Thread(target=self._run_centering_logic, args=(self._centering_on_img, self._centering_off_img), daemon=True).start()
+                else:
+                    ui_q.put(("toast", "❌ Centering Images Missing"))
+                    self._centering_state = 0
+                    self.resume_preview()
+                    self._resume_preview_after_snap = False
+            except Exception as e:
+                print(f"[Centering] Error: {e}")
+                self._centering_state = 0
+    
+    def _handle_pointing_laser_on(self, name, data):
+        """Handle pointing laser ON image"""
+        if name == "pointing_laser_on.jpg":
+            self._pointing_state = 2
+            self._set_preview(data)
+            self.ctrl.send({"cmd": "laser", "value": 0})
+            wait_ms = int(self.led_settle.get() * 1000)
+            self.root.after(wait_ms, lambda: self.ctrl.send({
+                "cmd": "snap", "width": self.width.get(), "height": self.height.get(),
+                "quality": self.quality.get(), "save": "pointing_laser_off.jpg", "hard_stop": False
+            }))
+    
+    def _handle_pointing_laser_off(self, name, data):
+        """Handle pointing laser OFF image"""
+        if name == "pointing_laser_off.jpg":
+            self._pointing_state = 3
+            self._set_preview(data)
+            path_on = DEFAULT_OUT_DIR / "pointing_laser_on.jpg"
+            path_off = DEFAULT_OUT_DIR / "pointing_laser_off.jpg"
+            try:
+                nparr_on = np.fromfile(path_on, np.uint8)
+                img_on = cv2.imdecode(nparr_on, cv2.IMREAD_COLOR)
+                nparr_off = np.fromfile(path_off, np.uint8)
+                img_off = cv2.imdecode(nparr_off, cv2.IMREAD_COLOR)
+                if img_on is not None and img_off is not None:
+                    threading.Thread(target=self._run_pointing_laser_logic, args=(img_on, img_off), daemon=True).start()
+            except Exception as e:
+                print(f"[Pointing] Laser Load Error: {e}")
+                self._pointing_state = 0
+    
+    def _handle_pointing_led_on(self, name, data):
+        """Handle pointing LED ON image"""
+        if name == "pointing_led_on.jpg":
+            self._pointing_state = 5
+            self._set_preview(data)
+            self.ctrl.send({"cmd": "led", "value": 0})
+            wait_ms = int(self.led_settle.get() * 1000)
+            self.root.after(wait_ms, lambda: self.ctrl.send({
+                "cmd": "snap", "width": self.width.get(), "height": self.height.get(),
+                "quality": self.quality.get(), "save": "pointing_led_off.jpg", "hard_stop": False
+            }))
+    
+    def _handle_pointing_led_off(self, name, data):
+        """Handle pointing LED OFF image"""
+        if name == "pointing_led_off.jpg":
+            self._pointing_state = 6
+            self._set_preview(data)
+            path_on = DEFAULT_OUT_DIR / "pointing_led_on.jpg"
+            path_off = DEFAULT_OUT_DIR / "pointing_led_off.jpg"
+            try:
+                nparr_on = np.fromfile(path_on, np.uint8)
+                img_on = cv2.imdecode(nparr_on, cv2.IMREAD_COLOR)
+                nparr_off = np.fromfile(path_off, np.uint8)
+                img_off = cv2.imdecode(nparr_off, cv2.IMREAD_COLOR)
+                if img_on is not None and img_off is not None:
+                    threading.Thread(target=self._run_pointing_object_logic, args=(img_on, img_off), daemon=True).start()
+            except Exception as e:
+                print(f"[Pointing] Object Load Error: {e}")
+                self._pointing_state = 0
+    
+    def _handle_generic_saved_image(self, name, data):
+        """Handle generic saved image - delegate to ScanController if scanning"""
+        # Process through ScanController (handles file save and real-time processing)
+        data = self.scan_controller.on_image_received(name, data)
+        
+        # Update GUI
+        self.dl_lbl.config(text=f"DL {len(data)}")
+        self._set_preview(data)
+        
+        # Save undistorted copy if enabled (existing feature)
+        if self.ud_save_copy.get() and self.image_processor.has_calibration():
+            try:
+                nparr = np.frombuffer(data, np.uint8)
+                bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                if bgr is not None:
+                    ud = self.image_processor.undistort(bgr, use_torch=True)
+                    base, ext = os.path.splitext(name)
+                    ud_name = f"{base}.ud{ext}"
+                    ud_path = DEFAULT_OUT_DIR / ud_name
+                    cv2.imwrite(str(ud_path), ud)
+            except Exception as e:
+                print(f"[UD Save] Error: {e}")
+        
+        if self._resume_preview_after_snap:
+            self.resume_preview()
+            self._resume_preview_after_snap = False
+    
+    def _handle_saved_image(self, payload):
+        """Route saved image events to specific handlers"""
+        name, data = payload
+        
+        self._handle_center_on_image(name, data)
+        self._handle_center_off_image(name, data)
+        self._handle_pointing_laser_on(name, data)
+        self._handle_pointing_laser_off(name, data)
+        self._handle_pointing_led_on(name, data)
+        self._handle_pointing_led_off(name, data)
+        
+        if name not in ["center_on.jpg", "center_off.jpg", "pointing_laser_on.jpg", 
+                        "pointing_laser_off.jpg", "pointing_led_on.jpg", "pointing_led_off.jpg"]:
+            self._handle_generic_saved_image(name, data)
+    
+    def _handle_pointing_step2(self):
+        """Handle pointing step 2 (LED ON)"""
+        self._pointing_state = 4
+        self.ctrl.send({"cmd": "led", "value": 255})
+        wait_ms = int(self.led_settle.get() * 1000)
+        self.root.after(wait_ms, lambda: self.ctrl.send({
+            "cmd": "snap", "width": self.width.get(), "height": self.height.get(),
+            "quality": self.quality.get(), "save": "pointing_led_on.jpg", "hard_stop": False
+        }))
+    
+    def _handle_preview_on(self):
+        """Handle preview enable request"""
+        self.preview_enable.set(True)
+        self.toggle_preview()
+    
+    # ========== End of Event Handlers ==========
 
+    def _poll(self):
+        """Main event loop - check triggers and process events"""
+        self._check_centering_trigger()
+        self._check_pointing_trigger()
+        
         try:
             while True:
                 tag, payload = ui_q.get_nowait()
+                
                 if tag == "evt":
-                    evt = payload; et = evt.get("event")
-                    if et == "hello":
-                        if self.preview_enable.get() and evt.get("agent_state")=="connected":
-                            self.toggle_preview()
-                    elif et == "start":
-                        total = int(evt.get("total",0))
-                        self.prog.configure(maximum=max(1,total), value=0)
-                        self.prog_lbl.config(text=f"0 / {total}"); self.dl_lbl.config(text="DL 0"); self.last_lbl.config(text="Last: -")
-                        
-                        # === CSV 오픈 ===
-                        sess = evt.get("session") or datetime.now().strftime("scan_%Y%m%d_%H%M%S")
-                        self._scan_csv_path = DEFAULT_OUT_DIR / f"{sess}_detections.csv"
-                        try:
-                            self._scan_csv_file = open(self._scan_csv_path, "w", newline="", encoding="utf-8")
-                            self._scan_csv_writer = csv.writer(self._scan_csv_file)
-                            self._scan_csv_writer.writerow(["pan_deg","tilt_deg","cx","cy","w","h","conf","cls","W","H"])
-                            print(f"[SCAN] CSV → {self._scan_csv_path}")
-                        except Exception as e:
-                            self._scan_csv_file = None
-                            self._scan_csv_writer = None
-                            ui_q.put(("toast", f"CSV 오픈 실패: {e}"))
-
-                    elif et == "progress":
-                        done=int(evt.get("done",0)); total=int(evt.get("total",0))
-                        if total > 0: self.prog.configure(maximum=total)
-                        self.prog.configure(value=done); self.prog_lbl.config(text=f"{done} / {total}")
-                        name = evt.get("name","")
-                        if name: self.last_lbl.config(text=f"Last: {name}")
-                    elif et == "done":
-                        ui_q.put(("toast", "[SCAN] 스캔 완료! LED ON/OFF 차분 이미지 처리 시작..."))
-                        
-                        def process_diff_and_yolo():
-                            try:
-                                import glob
-                                from collections import defaultdict
-                                led_on_files = sorted(glob.glob(str(DEFAULT_OUT_DIR / "*_led_on.jpg")))
-                                led_off_files = sorted(glob.glob(str(DEFAULT_OUT_DIR / "*_led_off.jpg")))
-                                pairs = defaultdict(dict)
-                                fname_re = re.compile(r"img_t(?P<tilt>[+\-]\d{2,3})_p(?P<pan>[+\-]\d{2,3})_.*_led_(?P<state>on|off)\.jpg$", re.IGNORECASE)
-                                for fpath in led_on_files + led_off_files:
-                                    fname = os.path.basename(fpath)
-                                    m = fname_re.search(fname)
-                                    if m:
-                                        pairs[(int(m.group("pan")), int(m.group("tilt")))][m.group("state")] = fpath
-                                ui_q.put(("toast", f"[DIFF] {len(pairs)}개 위치의 LED ON/OFF 쌍 발견"))
-                                
-                                # 2. CSV 파일 생성
-                                # sess = evt.get("session") or datetime.now().strftime("scan_%Y%m%d_%H%M%S")
-                                # csv_path = DEFAULT_OUT_DIR / f"{sess}_detections.csv"
-                                
-                                # 이미 _poll 시작 부분에서 생성된 self._scan_csv_file 사용
-                                if self._scan_csv_file is None:
-                                     sess = evt.get("session") or datetime.now().strftime("scan_%Y%m%d_%H%M%S")
-                                     csv_path = DEFAULT_OUT_DIR / f"{sess}_detections.csv"
-                                     # ... (open logic if needed, but usually opened at 'start')
-                                else:
-                                     csv_path = self._scan_csv_path
-
-                                # 만약 'start' 이벤트에서 열린 파일이 있다면 닫고 새로 열거나, 이어서 쓰거나.
-                                # 기존 로직: 'start'에서 열고 헤더 씀.
-                                # 여기서 또 열면 2개가 되거나 덮어씀.
-                                # 'start'에서 만든 파일에 이어서 쓰는게 맞음.
-                                
-                                # 하지만 여기서 'with open'으로 새로 열고 있음 -> 이게 문제.
-                                # self._scan_csv_writer를 사용해야 함.
-                                
-                                writer = self._scan_csv_writer
-                                if writer is None:
-                                    # fallback
-                                    f = open(csv_path, "a", newline="", encoding="utf-8")
-                                    writer = csv.writer(f)
-                                
-                                # 3. YOLO 모델 로드 (GPU 사용)
-                                if not _YOLO_OK:
-                                    ui_q.put(("toast", "❌ YOLO 미설치"))
-                                    return
-                                yolo_wpath = self.yolo_wpath.get().strip()
-                                if not yolo_wpath:
-                                    ui_q.put(("toast", "⚠️ YOLO 가중치 없음"))
-                                    return
-                                yolo_model = YOLO(yolo_wpath)
-                                device = "cuda" if (torch and torch.cuda.is_available()) else "cpu"
-                                ui_q.put(("toast", f"[YOLO] Device: {device}"))
-                                total_pairs = len(pairs); processed = 0; detected_count = 0
-                                for (pan, tilt), files in sorted(pairs.items()):
-                                    if "on" not in files or "off" not in files: continue
-                                    img_on = cv2.imread(files["on"])
-                                    img_off = cv2.imread(files["off"])
-                                    if img_on is None or img_off is None: continue
-                                    if self._ud_K is not None:
-                                        img_on = self._undistort_bgr(img_on)
-                                        img_off = self._undistort_bgr(img_off)
-                                    diff = cv2.absdiff(img_on, img_off)
-                                    H, W = diff.shape[:2]
-                                    boxes, scores, classes = predict_with_tiling(yolo_model, diff, rows=2, cols=3, overlap=0.15, conf=0.20, iou=0.45, device=device)
-                                    if boxes:
-                                        for i, (x, y, w, h) in enumerate(boxes):
-                                            writer.writerow([pan, tilt, x+w/2, y+h/2, w, h, float(scores[i]), int(classes[i]), W, H])
-                                            detected_count += 1
-                                    processed += 1
-                                    # [NEW] Update progress bar
-                                    ui_q.put(("evt", {"event": "progress", "done": processed, "total": total_pairs, "name": f"YOLO {processed}/{total_pairs}"}))
-                                    if processed % 10 == 0: ui_q.put(("toast", f"[DIFF] {processed}/{total_pairs}"))
-                                
-                                # [NEW] Flush and close CSV
-                                if self._scan_csv_file:
-                                    self._scan_csv_file.flush()
-                                    self._scan_csv_file.close()
-                                    self._scan_csv_file = None
-                                    self._scan_csv_writer = None
-                                    
-                                ui_q.put(("toast", f"✅ 완료: {csv_path} ({detected_count}개)")); ui_q.put(("preview_on", None))
-                            except Exception as e:
-                                ui_q.put(("toast", f"❌ 에러: {e}"))
-                                import traceback; traceback.print_exc()
-                        threading.Thread(target=process_diff_and_yolo, daemon=True).start()
-
+                    self._handle_server_event(payload)
                 elif tag == "preview":
                     self._set_preview(payload)
-
                 elif tag == "saved":
-                    name, data = payload
-                    if name == "center_on.jpg" and self._centering_state == 1:
-                        try:
-                            nparr = np.frombuffer(data, np.uint8)
-                            self._centering_on_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                            self._set_preview(data) # [NEW] Show captured image
-                            self._centering_state = 2
-                            self.ctrl.send({"cmd":"led", "value":0})
-                            self.root.after(int(self.led_settle.get()*1000), self._snap_center_off)
-                        except: self._centering_state = 0
-                    elif name == "center_off.jpg" and self._centering_state == 2:
-                        try:
-                            nparr = np.frombuffer(data, np.uint8)
-                            self._centering_off_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                            self._set_preview(data) # [NEW] Show captured image
-                            
-                            # [FIX] Run Centering Logic
-                            # [FIX] Run Centering Logic
-                            if self._centering_on_img is not None and self._centering_off_img is not None:
-                                ui_q.put(("toast", "🚀 Centering Logic Start"))
-                                threading.Thread(target=self._run_centering_logic, args=(self._centering_on_img, self._centering_off_img), daemon=True).start()
-                            else:
-                                ui_q.put(("toast", "❌ Centering Images Missing"))
-                                self._centering_state = 0
-                                self.resume_preview(); self._resume_preview_after_snap = False
-                        except Exception as e:
-                            print(f"[Centering] Error: {e}")
-                            self._centering_state = 0
-
-                    # [NEW] Pointing Mode Handlers
-                    elif name == "pointing_laser_on.jpg":
-                        self._pointing_state = 2 # WAIT_LASER_OFF
-                        self._set_preview(data) # [NEW] Preview
-                        self.ctrl.send({"cmd":"laser", "value":0})
-                        wait_ms = int(self.led_settle.get() * 1000)
-                        self.root.after(wait_ms, lambda: self.ctrl.send({
-                            "cmd":"snap", "width":self.width.get(), "height":self.height.get(),
-                            "quality":self.quality.get(), "save":"pointing_laser_off.jpg", "hard_stop":False
-                        }))
-                        
-                    elif name == "pointing_laser_off.jpg":
-                        self._pointing_state = 3 # PROCESSING_LASER
-                        self._set_preview(data) # [NEW] Preview
-                        path_on = DEFAULT_OUT_DIR / "pointing_laser_on.jpg"
-                        path_off = DEFAULT_OUT_DIR / "pointing_laser_off.jpg"
-                        try:
-                            nparr_on = np.fromfile(path_on, np.uint8)
-                            img_on = cv2.imdecode(nparr_on, cv2.IMREAD_COLOR)
-                            nparr_off = np.fromfile(path_off, np.uint8)
-                            img_off = cv2.imdecode(nparr_off, cv2.IMREAD_COLOR)
-                            if img_on is not None and img_off is not None:
-                                threading.Thread(target=self._run_pointing_laser_logic, args=(img_on, img_off), daemon=True).start()
-                        except Exception as e:
-                            print(f"[Pointing] Laser Load Error: {e}")
-                            self._pointing_state = 0
-
-                    elif name == "pointing_led_on.jpg":
-                        self._pointing_state = 5 # WAIT_LED_OFF
-                        self._set_preview(data) # [NEW] Preview
-                        self.ctrl.send({"cmd":"led", "value":0})
-                        wait_ms = int(self.led_settle.get() * 1000)
-                        self.root.after(wait_ms, lambda: self.ctrl.send({
-                            "cmd":"snap", "width":self.width.get(), "height":self.height.get(),
-                            "quality":self.quality.get(), "save":"pointing_led_off.jpg", "hard_stop":False
-                        }))
-
-                    elif name == "pointing_led_off.jpg":
-                        self._pointing_state = 6 # PROCESSING_OBJECT
-                        self._set_preview(data) # [NEW] Preview
-                        path_on = DEFAULT_OUT_DIR / "pointing_led_on.jpg"
-                        path_off = DEFAULT_OUT_DIR / "pointing_led_off.jpg"
-                        try:
-                            nparr_on = np.fromfile(path_on, np.uint8)
-                            img_on = cv2.imdecode(nparr_on, cv2.IMREAD_COLOR)
-                            nparr_off = np.fromfile(path_off, np.uint8)
-                            img_off = cv2.imdecode(nparr_off, cv2.IMREAD_COLOR)
-                            if img_on is not None and img_off is not None:
-                                threading.Thread(target=self._run_pointing_object_logic, args=(img_on, img_off), daemon=True).start()
-                        except Exception as e:
-                            print(f"[Pointing] Object Load Error: {e}")
-                            self._pointing_state = 0
-
-
-
-
-
-
-
-                    else:
-                        self.dl_lbl.config(text=f"DL {len(data)}")
-                        # [NEW] Show scanned image in preview
-                        self._set_preview(data)
-                        
-                        # [RESTORED] Save undistorted copy if enabled
-                        if self.ud_save_copy.get() and self._ud_K is not None:
-                             try:
-                                 nparr = np.frombuffer(data, np.uint8)
-                                 bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                                 if bgr is not None:
-                                     ud = self._undistort_bgr(bgr)
-                                     # name is like "img_t..._p..._....jpg"
-                                     # save as "img_t..._p..._....ud.jpg"
-                                     base, ext = os.path.splitext(name)
-                                     ud_name = f"{base}.ud{ext}"
-                                     ud_path = DEFAULT_OUT_DIR / ud_name
-                                     cv2.imwrite(str(ud_path), ud)
-                             except Exception as e:
-                                 print(f"[UD Save] Error: {e}")
-
-                        if self._resume_preview_after_snap:
-                            self.resume_preview(); self._resume_preview_after_snap = False
-
+                    self._handle_saved_image(payload)
                 elif tag == "toast":
                     print(f"[TOAST] {payload}")
-
                 elif tag == "pointing_step_2":
-                    self._pointing_state = 4 # WAIT_LED_ON
-                    self.ctrl.send({"cmd":"led", "value":255})
-                    wait_ms = int(self.led_settle.get() * 1000)
-                    self.root.after(wait_ms, lambda: self.ctrl.send({
-                        "cmd":"snap", "width":self.width.get(), "height":self.height.get(),
-                        "quality":self.quality.get(), "save":"pointing_led_on.jpg", "hard_stop":False
-                    }))
-
+                    self._handle_pointing_step2()
                 elif tag == "preview_on":
-                    self.preview_enable.set(True)
-                    self.toggle_preview()
-
+                    self._handle_preview_on()
         except queue.Empty:
             pass
-        self.root.after(60, self._poll)
+        
+        self.root.after(POLL_INTERVAL_MS, self._poll)
 
     # ---------- 고정 박스 안에 '레터박스(contain)'로 그리기 ----------
     def _draw_preview_to_label(self, pil_image: Image.Image):
@@ -1481,7 +1759,7 @@ class App:
             bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
             if bgr is None: return
 
-            if self.ud_enable.get() and self._ud_K is not None:
+            if self.ud_enable.get() and self.image_processor.has_calibration():
                 bgr = self._undistort_bgr(bgr)
 
 

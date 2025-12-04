@@ -186,7 +186,7 @@ def run_yolo_on_folder():
             boxes, scores, classes = predict_with_tiling(
                 model, img, 
                 rows=2, cols=3, 
-                overlap=0.15, 
+                overlap=0.25, 
                 conf=0.20, 
                 iou=0.45, 
                 device=device
