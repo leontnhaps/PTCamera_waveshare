@@ -16,10 +16,35 @@ LASER_PIN = 15  # BCM 15번 핀 (물리적 핀 10번)
 # GPIO Setup moved to main execution block
 
 # ===================== 환경 설정 =====================
-#DEFAULT_SERVER_HOST = "192.168.0.9" # 711a
-DEFAULT_SERVER_HOST = "172.30.1.13" # 602a
-#DEFAULT_SERVER_HOST = "10.95.38.118" # hotspot
-SERVER_HOST = os.getenv("SERVER_HOST", DEFAULT_SERVER_HOST)   # 노트북/PC 서버 IP
+# 서버 IP 목록 (환경별)
+SERVER_OPTIONS = {
+    "1": ("192.168.0.9", "711a"),
+    "2": ("172.30.1.13", "602a"),
+    "3": ("10.95.38.118", "hotspot")
+}
+
+def select_server():
+    """실행 시 서버 IP 선택"""
+    print("\n" + "="*50)
+    print("서버 선택 (Server Selection)")
+    print("="*50)
+    for key, (ip, name) in SERVER_OPTIONS.items():
+        print(f"  [{key}] {name:10s} → {ip}")
+    print("="*50)
+    
+    while True:
+        choice = input("서버 번호를 선택하세요 (1/2/3) [기본값: 2]: ").strip()
+        if not choice:  # Enter만 누르면 기본값
+            choice = "2"
+        if choice in SERVER_OPTIONS:
+            ip, name = SERVER_OPTIONS[choice]
+            print(f"✓ 선택됨: {name} ({ip})\n")
+            return ip
+        else:
+            print("❌ 잘못된 입력입니다. 1, 2, 3 중에서 선택하세요.")
+
+# 서버 IP 설정 (환경 변수 우선, 없으면 선택 메뉴)
+SERVER_HOST = os.getenv("SERVER_HOST") or select_server()
 CTRL_PORT   = int(os.getenv("CTRL_PORT", "7500"))
 IMG_PORT    = int(os.getenv("IMG_PORT",  "7501"))
 BAUD        = 115200

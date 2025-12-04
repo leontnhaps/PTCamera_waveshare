@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # pc_server.py — Headless broker between Raspberry Pi agent and GUI client
-import json, socket, socketserver, struct, threading, pathlib, os, time
+import json, socket, socketserver, struct, threading, pathlib, time
 from datetime import datetime
 
 # Ports
