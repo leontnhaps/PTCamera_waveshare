@@ -187,7 +187,7 @@ def predict_with_tiling(model, img, rows=2, cols=3, overlap=0.15, conf=0.25, iou
     if not all_boxes:
         return [], [], []
 
-    indices = non_max_suppression(all_boxes, all_scores, iou_threshold=0.3)
+    indices = non_max_suppression(all_boxes, all_scores, iou_threshold=0.6)
     
     final_boxes = []
     final_scores = []
