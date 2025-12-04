@@ -40,7 +40,7 @@ OpenCV와 YOLO를 활용한 자동 타겟팅 및 레이저 포인팅 시스템
 
 ### 1. **Auto Sequence (자동 시퀀스)**
 - **One-Click Operation**: 버튼 하나로 전체 프로세스 실행
-- **Workflow**: Scan → Compute Target → Move → Centering → Pointing
+- **Workflow**: Scan → Compute Target → Move → Pointing
 - 각 단계별 자동 전환 및 에러 처리
 
 ### 2. **스캔 모드 (Scan)**
@@ -58,20 +58,6 @@ OpenCV와 YOLO를 활용한 자동 타겟팅 및 레이저 포인팅 시스템
 ### 3. **Pointing Mode (정밀 타겟팅)**
 - **SAHI (Slicing Aided Hyper Inference) 기법 적용**:
     - 고해상도 이미지를 6등분(2x3) 타일링하여 YOLO 추론
-    - 작은 객체(Small Object) 인식률 대폭 향상
-- **레이저 트래킹**:
-    - LED ON/OFF 차분(Diff) 이미지 분석
-    - ROI, GaussianBlur, Threshold, FindContours 기법 활용
-    - 레이저 포인트 자동 감지 및 타겟 정렬
-
-### 4. **Centering Mode (중앙 정렬)**
-- YOLO Centroid 기반 실시간 피드백 제어
-- 목표 객체를 화면 중앙에 유지하도록 Pan/Tilt 미세 조정
-
-### 5. **프리뷰 & 설정 (Preview & Settings)**
-- 실시간 라이브 프리뷰
-- 해상도 조정 (640x360 ~ 2592x1944)
-- FPS 및 품질 설정
 - 왜곡 보정 적용/해제
 - Alpha/Balance 파라미터 조정
 
@@ -196,21 +182,6 @@ cd Com
 python auto_sequence.py
 ```
 
-### 2. Auto Sequence (자동 모드)
-
-1. **준비**: `Load calib.npz` 및 `Load YOLO` 완료
-2. **실행**: `Auto Sequence` 탭의 `START AUTO SEQUENCE` 버튼 클릭
-3. **동작**:
-    - **Scan**: 전체 영역 스캔 및 CSV 저장
-    - **Compute**: 타겟 위치 계산
-    - **Move**: 타겟 위치로 이동
-    - **Centering**: 정밀 중앙 정렬
-    - **Pointing**: 레이저 ON/OFF 및 타겟 조준
-
-### 3. 수동 제어 및 테스트
-
-- **Manual Tab**: Pan/Tilt 직접 제어, LED/Laser ON/OFF
-- **Preview Tab**: 실시간 화면 확인, 왜곡 보정 설정
 - **ERTest.py**: 이미지 처리 알고리즘(Diff, Threshold 등) 단위 테스트
 
 ---

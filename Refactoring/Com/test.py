@@ -910,36 +910,16 @@ class App:
 
         # (선택) 현재 명령 각도 기억
         self._curr_pan = 0.0
-        self._curr_tilt = 0.0
+        self._curr_tilt = 0.00
         
         self._fits_h = {}
         self._fits_v = {}
-        # Pointing 탭에 추가 UI
-        # centering state
-        self._centering_state = 0 # 0:IDLE, 1:WAIT_ON, 2:WAIT_OFF
-        self._centering_on_img = None
-        self._centering_off_img = None
-        self._centering_stable_cnt = 0
-        self._centering_last_ts = 0
-        self._centering_ok_frames = 0
-        self._centering_last_ms = 0
         
-        # Pointing state
-        self._pointing_state = 0 # 0:IDLE, 1:LASER_ON, 2:LASER_OFF, 3:LED_ON, 4:LED_OFF
-        self._pointing_laser_on_img = None
-        self._pointing_laser_off_img = None
-        self._pointing_led_on_img = None
-        self._pointing_led_off_img = None
-        self._pointing_stable_cnt = 0
-        self._pointing_last_ts = 0
-
-        # [MOVED] Centering variables definition
-        self.centering_enable   = BooleanVar(value=False)
-        self.centering_px_tol   = IntVar(value=5)      # 중앙 판정 오차(px)
-        self.centering_min_frames = IntVar(value=4)    # 연속 N프레임 만족 시 종료
-        self.centering_max_step = DoubleVar(value=1.0) # 한번에 움직일 최대 각도(°)
-        self.centering_cooldown = IntVar(value=250)    # 명령 간 최소 간격(ms)
-        self.show_center_marker = BooleanVar(value=False)
+        # Pointing mode settings
+        self.pointing_px_tol = IntVar(value=5)
+        self.pointing_min_frames = IntVar(value=4)
+        self.pointing_max_step = DoubleVar(value=1.0)
+        self.pointing_cooldown = IntVar(value=250)
 
 
         # ---------------------------------------------------------------------
@@ -981,15 +961,28 @@ class App:
         self.point_scroll.pack(side="right", fill="y")
         
         # --- Pointing Mode Controls (Inside Scroll Frame) ---
-        point_ctrl_frame = ttk.LabelFrame(self.point_scroll_frame, text="Pointing Control")
-        point_ctrl_frame.pack(padx=10, pady=10, fill="x")
+        # Use grid layout with 3 columns (all side-by-side)
         
-        self.pointing_enable = tk.BooleanVar(value=False)
-        ttk.Checkbutton(point_ctrl_frame, text="Enable Pointing Mode", variable=self.pointing_enable, command=self.on_pointing_toggle).pack(anchor="w", padx=5, pady=5)
+        # Column 1: Pointing Settings
+        col1_frame = ttk.Frame(self.point_scroll_frame)
+        col1_frame.grid(row=0, column=0, padx=5, pady=10, sticky="nsew")
         
-        # Pointing Settings (Editable)
-        point_set_frame = ttk.LabelFrame(self.point_scroll_frame, text="Pointing Settings")
-        point_set_frame.pack(padx=10, pady=10, fill="x")
+        # Column 2: Pointing Control
+        col2_frame = ttk.Frame(self.point_scroll_frame)
+        col2_frame.grid(row=0, column=1, padx=5, pady=10, sticky="nsew")
+        
+        # Column 3: CSV Analysis
+        col3_frame = ttk.Frame(self.point_scroll_frame)
+        col3_frame.grid(row=0, column=2, padx=5, pady=10, sticky="nsew")
+        
+        # Configure column weights for proper resizing
+        self.point_scroll_frame.grid_columnconfigure(0, weight=1)
+        self.point_scroll_frame.grid_columnconfigure(1, weight=1)
+        self.point_scroll_frame.grid_columnconfigure(2, weight=1)
+        
+        # --- Column 1: Pointing Settings ---
+        point_set_frame = ttk.LabelFrame(col1_frame, text="Pointing Settings")
+        point_set_frame.pack(padx=5, pady=5, fill="both", expand=True)
         
         def add_entry(parent, label, var, row):
             ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=5, pady=2)
@@ -998,40 +991,43 @@ class App:
         self.pointing_roi_size = tk.IntVar(value=200)
         add_entry(point_set_frame, "Laser ROI Size (px):", self.pointing_roi_size, 0)
         
-        ttk.Label(point_set_frame, text="--- Shared Settings ---").grid(row=1, column=0, columnspan=2, pady=5)
-        add_entry(point_set_frame, "Tolerance (px):", self.centering_px_tol, 2)
-        add_entry(point_set_frame, "Min Stable Frames:", self.centering_min_frames, 3)
-        add_entry(point_set_frame, "Max Step (deg):", self.centering_max_step, 4)
-        add_entry(point_set_frame, "Cooldown (ms):", self.centering_cooldown, 5)
-        add_entry(point_set_frame, "Cooldown (ms):", self.centering_cooldown, 5)
+        ttk.Label(point_set_frame, text="--- Pointing Settings ---").grid(row=1, column=0, columnspan=2, pady=5)
+        add_entry(point_set_frame, "Tolerance (px):", self.pointing_px_tol, 2)
+        add_entry(point_set_frame, "Min Stable Frames:", self.pointing_min_frames, 3)
+        add_entry(point_set_frame, "Max Step (deg):", self.pointing_max_step, 4)
+        add_entry(point_set_frame, "Cooldown (ms):", self.pointing_cooldown, 5)
         add_entry(point_set_frame, "LED Settle (s):", self.led_settle, 6)
         
-        # [NEW] Centering & Marker Toggles in Settings
-        ttk.Checkbutton(point_set_frame, text="Centering Mode (Live Refine)", variable=self.centering_enable, command=self.on_centering_toggle).grid(row=7, column=0, columnspan=2, sticky="w", padx=5, pady=2)
-        ttk.Checkbutton(point_set_frame, text="Show Center Marker", variable=self.show_center_marker).grid(row=8, column=0, columnspan=2, sticky="w", padx=5, pady=2)
-
-        # CSV Analysis (Existing)
-        point_csv_frame = ttk.LabelFrame(self.point_scroll_frame, text="CSV Analysis (Legacy)")
-        point_csv_frame.pack(padx=10, pady=10, fill="x")
+        # --- Column 2: Pointing Control ---
+        point_ctrl_frame = ttk.LabelFrame(col2_frame, text="Pointing Control")
+        point_ctrl_frame.pack(padx=5, pady=5, fill="both", expand=True)
         
-        ttk.Button(point_csv_frame, text="Select CSV", command=self.pointing_choose_csv).pack(anchor="w", padx=5, pady=2)
+        self.pointing_enable = tk.BooleanVar(value=False)
+        ttk.Checkbutton(point_ctrl_frame, text="Enable Pointing Mode", variable=self.pointing_enable, command=self.on_pointing_toggle).pack(anchor="w", padx=5, pady=5)
+
+        # --- Column 3: CSV Analysis ---
+        point_csv_frame = ttk.LabelFrame(col3_frame, text="CSV Analysis (Legacy)")
+        point_csv_frame.pack(padx=5, pady=5, fill="both", expand=True)
+        
         self.point_csv_path = tk.StringVar()
-        ttk.Label(point_csv_frame, textvariable=self.point_csv_path, wraplength=300).pack(anchor="w", padx=5, pady=2)
+        ttk.Label(point_csv_frame, textvariable=self.point_csv_path, wraplength=200).pack(anchor="w", padx=5, pady=2)
         
         ttk.Label(point_csv_frame, text="Conf Min:").pack(anchor="w", padx=5)
-        self.point_conf_min = tk.StringVar(value="0.5")
-        ttk.Entry(point_csv_frame, textvariable=self.point_conf_min, width=10).pack(anchor="w", padx=5)
+        self.point_conf_min = tk.StringVar(value="0.6")
+        ttk.Entry(point_csv_frame, textvariable=self.point_conf_min, width=15).pack(anchor="w", padx=5)
         
         ttk.Label(point_csv_frame, text="Min Samples:").pack(anchor="w", padx=5)
-        self.point_min_samples = tk.StringVar(value="5")
-        ttk.Entry(point_csv_frame, textvariable=self.point_min_samples, width=10).pack(anchor="w", padx=5)
+        self.point_min_samples = tk.StringVar(value="2")
+        ttk.Entry(point_csv_frame, textvariable=self.point_min_samples, width=15).pack(anchor="w", padx=5)
         
-        ttk.Button(point_csv_frame, text="Compute Target", command=self.pointing_compute).pack(anchor="w", padx=5, pady=5)
         self.point_result_lbl = ttk.Label(point_csv_frame, text="Result: -")
         self.point_result_lbl.pack(anchor="w", padx=5, pady=5)
         
         # [RESTORED] Move to Target Button
         ttk.Button(point_csv_frame, text="Move to Target", command=self.pointing_move).pack(anchor="w", padx=5, pady=5)
+
+
+
 
 
         # [NEW] Auto-load calib.npz if exists
@@ -1180,23 +1176,65 @@ class App:
         })
     def stop_scan(self):
         self.ctrl.send({"cmd":"scan_stop"})
+        
+        # Get scan results from ScanController
+        result = self.scan_controller.stop_scan()
+        print(f"[DEBUG stop_scan] result = {result}")
+        
+        # Auto-load CSV to Pointing tab if available
+        if result and result.get('csv_path'):
+            csv_path = result['csv_path']
+            print(f"[DEBUG stop_scan] CSV path found: {csv_path}")
+            self.point_csv_path.set(str(csv_path))
+            print(f"[DEBUG stop_scan] point_csv_path set to: {self.point_csv_path.get()}")
+            ui_q.put(("toast", f"✅ Scan 완료! CSV 자동 로드됨: {csv_path.name}"))
+            self.pointing_compute()
+        else:
+            print(f"[DEBUG stop_scan] No CSV path in result!")
+        
         self.root.after(500, lambda: ui_q.put(("preview_on", None)))
 
-    def on_centering_toggle(self):
-        if self.centering_enable.get():
-            ui_q.put(("toast", "🚀 Centering Mode Started"))
-            self._centering_state = 0
-            self._centering_stable_cnt = 0
-            self._snap_center_on()
-        else:
-            ui_q.put(("preview_on", None))
 
     def on_pointing_toggle(self):
-        if not self.pointing_enable.get():
+        if self.pointing_enable.get():
             ui_q.put(("preview_on", None))
             # Laser OFF when stopping
             self.ctrl.send({"cmd":"laser", "value": 0})
+                        # ==== 여기서 좌표 로깅 시작 ====
+            try:
+                from datetime import datetime
+                import csv, os
+                log_dir = DEFAULT_OUT_DIR
+                os.makedirs(log_dir, exist_ok=True)
+                fname = f"point_xy_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                path  = log_dir / fname
+                # 열려있던 거 있으면 닫기
+                if self._pointing_log_fp:
+                    try: self._pointing_log_fp.close()
+                    except: pass
+                self._pointing_log_fp = open(path, "w", newline="", encoding="utf-8")
+                self._pointing_log_writer = csv.writer(self._pointing_log_fp)
+                self._pointing_log_writer.writerow(
+                    ["ts","pan_cmd_deg","tilt_cmd_deg","mean_cx","mean_cy","err_x_px","err_y_px","W","H","n_dets"]
+                )
+                self._pointing_logging = True
+                ui_q.put(("toast", f"[Point] logging → {path} (preview 켜고 YOLO ON 하면 기록)"))
+            except Exception as e:
+                self._pointing_logging = False
+                ui_q.put(("toast", f"[Point] 로그 시작 실패: {e}"))
+        else:
             self.laser_on.set(False)
+            # CSV 종료 추가
+            if self._pointing_log_fp:
+                try:
+                    self._pointing_log_fp.close()
+                    self._pointing_log_fp = None
+                    self._pointing_log_writer = None
+                    self._pointing_logging = False
+                    ui_q.put(("toast", "📄 Pointing log 종료"))
+                except Exception as e:
+                    ui_q.put(("toast", f"❌ log 종료 실패: {e}"))
+                
     def center(self): self.ctrl.send({"cmd":"move","pan":0.0,"tilt":0.0,"speed":self.speed.get(),"acc":float(self.acc.get())})
     def apply_move(self): self.ctrl.send({"cmd":"move","pan":float(self.mv_pan.get()),"tilt":float(self.mv_tilt.get()),
                                           "speed":self.mv_speed.get(),"acc":float(self.mv_acc.get())})
@@ -1248,132 +1286,6 @@ class App:
     # event loop
     # ==== [NEW] Centering Mode Logic ====
     # (_start_centering_cycle and _snap_center_on are defined later - removed duplicate)
-
-    def _snap_center_off(self):
-        # 4. Snap OFF image
-        self._send_snap_cmd("center_off.jpg", False)
-
-    def _run_centering_logic(self, img_on, img_off):
-        """백그라운드 스레드에서 실행되는 Centering 핵심 로직"""
-        try:
-            # 1. Undistort (use helper)
-            img_on, img_off = self._undistort_pair(img_on, img_off)
-            
-            # 2. Diff
-            diff = cv2.absdiff(img_on, img_off)
-            
-            # 3. YOLO (Tiling) - use cached model
-            model = self._get_yolo_model()
-            if model is None:
-                ui_q.put(("toast", "❌ YOLO 모델 없음"))
-                return
-            
-            device = self._get_device()
-            
-            # conf=0.20, iou=0.45
-            boxes, scores, classes = predict_with_tiling(
-                model, diff, rows=2, cols=3, overlap=0.15, 
-                conf=0.20, iou=0.45, device=device
-            )
-            
-            if not boxes:
-                ui_q.put(("toast", "[Center] ⚠️ YOLO 객체 없음 (No boxes)"))
-                self._centering_stable_cnt = 0
-                # [DEBUG] Save images for inspection
-                cv2.imwrite("debug_center_on.jpg", img_on)
-                cv2.imwrite("debug_center_off.jpg", img_off)
-                cv2.imwrite("debug_center_diff.jpg", diff)
-                return
-
-            # 4. 최고 conf 객체 찾기
-            best_idx = np.argmax(scores)
-            x, y, w, h = boxes[best_idx]
-            conf = scores[best_idx]
-            
-            # 중심 좌표
-            obj_cx = x + w / 2.0
-            obj_cy = y + h / 2.0
-            
-            # 5. 오차 계산
-            H, W = diff.shape[:2]
-            center_x, center_y = W / 2.0, H / 2.0
-            err_x = obj_cx - center_x
-            err_y = obj_cy - center_y
-            
-            ui_q.put(("toast", f"[Center] err=({err_x:.1f}, {err_y:.1f}) conf={conf:.2f}"))
-            
-            # 6. 안정성 판단
-            tol = self.centering_px_tol.get()
-            if abs(err_x) <= tol and abs(err_y) <= tol:
-                self._centering_stable_cnt += 1
-                ui_q.put(("toast", f"✅ 수렴 중... {self._centering_stable_cnt}/{self.centering_min_frames.get()}"))
-                
-                if self._centering_stable_cnt >= self.centering_min_frames.get():
-                    final_pan = round(self._curr_pan, 2)
-                    final_tilt = round(self._curr_tilt, 2)
-                    ui_q.put(("toast", f"🎉 Centering 완료! Final: (P={final_pan}, T={final_tilt})"))
-                    self.centering_enable.set(False); ui_q.put(("preview_on", None)) # 종료 및 프리뷰 복구
-                    return
-                
-                # [FIX] Not yet finished, schedule next check
-                self.root.after(self.centering_cooldown.get(), self._snap_center_on)
-            else:
-                self._centering_stable_cnt = 0
-                
-                # 7. 이동 (Move) - use helper for angle calculation
-                d_pan, d_tilt = self._calculate_angle_delta(err_x, err_y)
-                
-                # 현재 위치 추정 (명령 기준)
-                # self._curr_pan, self._curr_tilt 사용
-                next_pan = self._curr_pan + d_pan
-                next_tilt = self._curr_tilt + d_tilt
-                
-                # [NEW] Round to nearest integer (no accumulation)
-                # next_pan = float(round(next_pan))
-                # next_tilt = float(round(next_tilt))
-                
-                # Revert to accumulation (User request)
-                # self._curr_pan, self._curr_tilt are floats and accumulate small changes.
-                # Hardware will take the integer part when sending commands, but we keep the float state.
-                
-                # 범위 제한 (Centering Mode는 스캔 범위가 아닌 전체 하드웨어 범위를 사용해야 함)
-                # Hardware limits: Pan -180~180, Tilt -30~90 (Defaults)
-                next_pan = max(-180, min(180, next_pan))
-                next_tilt = max(-30, min(90, next_tilt))
-                
-                ui_q.put(("toast", f"→ Move: Cur({self._curr_pan:.2f}, {self._curr_tilt:.2f}) + d({d_pan:.2f}, {d_tilt:.2f}) -> Next({next_pan:.2f}, {next_tilt:.2f})"))
-
-                self._curr_pan = next_pan
-                self._curr_tilt = next_tilt
-                
-                self.ctrl.send({
-                    "cmd": "move",
-                    "pan": next_pan,
-                    "tilt": next_tilt,
-                    "speed": self.speed.get(),
-                    "acc": float(self.acc.get())
-                })
-                # ui_q.put(("toast", f"→ Adjust: dP={d_pan:.2f}, dT={d_tilt:.2f}"))
-                
-                # [FIX] Schedule next cycle
-                self.root.after(self.centering_cooldown.get(), self._snap_center_on)
-
-        except Exception as e:
-            ui_q.put(("toast", f"❌ Centering Error: {e}"))
-            import traceback
-            traceback.print_exc()
-
-    # [NEW] Helper to start centering cycle
-    def _snap_center_on(self):
-        if not self.centering_enable.get(): return
-        self._centering_state = 1 # WAIT_ON
-        self.ctrl.send({"cmd":"led", "value":255})
-        wait_ms = int(self.led_settle.get() * 1000)
-        self.root.after(wait_ms, lambda: self._send_snap_cmd("center_on.jpg", False))
-
-    def _snap_center_off(self):
-        if not self.centering_enable.get(): return
-        self._send_snap_cmd("center_off.jpg", False)
 
     def _find_laser_center(self, img_on, img_off, roi_size=200):
         h, w = img_on.shape[:2]
@@ -1551,13 +1463,6 @@ class App:
 
     # ========== Event Handlers (Phase 2 Refactoring) ==========
     
-    def _check_centering_trigger(self):
-        """Check and trigger centering cycle if needed"""
-        if self.centering_enable.get() and self._centering_state == 0:
-            now = time.time() * 1000
-            if now - self._centering_last_ts > self.centering_cooldown.get():
-                self._start_centering_cycle()
-    
     def _check_pointing_trigger(self):
         """Check and trigger pointing cycle if needed"""
         if self.pointing_enable.get() and self._pointing_state == 0:
@@ -1608,8 +1513,13 @@ class App:
         processed = results.get('processed', 0)
         detected = results.get('detected', 0)
         
+        # Auto-load CSV to Pointing tab
+        if csv_path and csv_path != 'unknown':
+            self.point_csv_path.set(str(csv_path))
+            print(f"[DEBUG scan_done] CSV auto-loaded to Pointing tab: {csv_path}")
+            self.pointing_compute()
         ui_q.put(("toast", f"✅ 스캔 완료: {processed}개 처리, {detected}개 검출"))
-        ui_q.put(("toast", f"📄 CSV: {csv_path}"))
+        ui_q.put(("toast", f"📄 CSV 자동 로드됨: {csv_path}"))
         ui_q.put(("preview_on", None))
     
     def _handle_server_event(self, evt):
@@ -1624,38 +1534,6 @@ class App:
         elif et == "done":
             self._handle_scan_done(evt)
     
-    def _handle_center_on_image(self, name, data):
-        """Handle centering ON image capture"""
-        if name == "center_on.jpg" and self._centering_state == 1:
-            try:
-                nparr = np.frombuffer(data, np.uint8)
-                self._centering_on_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                self._set_preview(data)
-                self._centering_state = 2
-                self.ctrl.send({"cmd": "led", "value": 0})
-                self.root.after(int(self.led_settle.get() * 1000), self._snap_center_off)
-            except:
-                self._centering_state = 0
-    
-    def _handle_center_off_image(self, name, data):
-        """Handle centering OFF image capture"""
-        if name == "center_off.jpg" and self._centering_state == 2:
-            try:
-                nparr = np.frombuffer(data, np.uint8)
-                self._centering_off_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                self._set_preview(data)
-                
-                if self._centering_on_img is not None and self._centering_off_img is not None:
-                    ui_q.put(("toast", "🚀 Centering Logic Start"))
-                    threading.Thread(target=self._run_centering_logic, args=(self._centering_on_img, self._centering_off_img), daemon=True).start()
-                else:
-                    ui_q.put(("toast", "❌ Centering Images Missing"))
-                    self._centering_state = 0
-                    self.resume_preview()
-                    self._resume_preview_after_snap = False
-            except Exception as e:
-                print(f"[Centering] Error: {e}")
-                self._centering_state = 0
     
     def _handle_pointing_laser_on(self, name, data):
         """Handle pointing laser ON image"""
@@ -1748,15 +1626,13 @@ class App:
         """Route saved image events to specific handlers"""
         name, data = payload
         
-        self._handle_center_on_image(name, data)
-        self._handle_center_off_image(name, data)
         self._handle_pointing_laser_on(name, data)
         self._handle_pointing_laser_off(name, data)
         self._handle_pointing_led_on(name, data)
         self._handle_pointing_led_off(name, data)
         
-        if name not in ["center_on.jpg", "center_off.jpg", "pointing_laser_on.jpg", 
-                        "pointing_laser_off.jpg", "pointing_led_on.jpg", "pointing_led_off.jpg"]:
+        if name not in ["pointing_laser_on.jpg", "pointing_laser_off.jpg", 
+                        "pointing_led_on.jpg", "pointing_led_off.jpg"]:
             self._handle_generic_saved_image(name, data)
     
     def _handle_pointing_step2(self):
@@ -1778,7 +1654,6 @@ class App:
 
     def _poll(self):
         """Main event loop - check triggers and process events"""
-        self._check_centering_trigger()
         self._check_pointing_trigger()
         
         try:
@@ -1809,17 +1684,6 @@ class App:
         if iw <= 0 or ih <= 0 or W <= 0 or H <= 0:
             return
         
-        # [NEW] Centering Mode Marker
-        if self.centering_enable.get() or self.show_center_marker.get():
-            draw = ImageDraw.Draw(pil_image)
-            cx, cy = iw / 2, ih / 2
-            r = 5
-            # Red circle
-            draw.ellipse((cx-r, cy-r, cx+r, cy+r), outline="red", width=2)
-            # Crosshair
-            draw.line((cx-10, cy, cx+10, cy), fill="red", width=2)
-            draw.line((cx, cy-10, cx, cy+10), fill="red", width=2)
-
         scale = min(W / iw, H / ih)
         nw = max(1, int(round(iw * scale)))
         nh = max(1, int(round(ih * scale)))
@@ -1980,7 +1844,8 @@ class App:
             tilt_target = wavg_center(fits_v, "tilt_center")
             if pan_target is not None:  self.point_pan_target.set(round(pan_target, 3))
             if tilt_target is not None: self.point_tilt_target.set(round(tilt_target, 3))
-
+            result_text = f"Pan: {self.point_pan_target.get()}°, Tilt: {self.point_tilt_target.get()}°\n(H fits: {len(fits_h)}, V fits: {len(fits_v)})"
+            self.point_result_lbl.config(text=result_text)
             ui_q.put(("toast",
                 f"[Pointing] pan={self.point_pan_target.get()}°, "
                 f"tilt={self.point_tilt_target.get()}°  "
@@ -2005,28 +1870,6 @@ class App:
         self.ctrl.send({"cmd":"move","pan":pan_t,"tilt":tilt_t,"speed":spd,"acc":acc})
         ui_q.put(("toast", f"→ Move to (pan={pan_t}°, tilt={tilt_t}°)"))
 
-        # ==== 여기서 좌표 로깅 시작 ====
-        try:
-            from datetime import datetime
-            import csv, os
-            log_dir = DEFAULT_OUT_DIR
-            os.makedirs(log_dir, exist_ok=True)
-            fname = f"point_xy_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            path  = log_dir / fname
-            # 열려있던 거 있으면 닫기
-            if self._pointing_log_fp:
-                try: self._pointing_log_fp.close()
-                except: pass
-            self._pointing_log_fp = open(path, "w", newline="", encoding="utf-8")
-            self._pointing_log_writer = csv.writer(self._pointing_log_fp)
-            self._pointing_log_writer.writerow(
-                ["ts","pan_cmd_deg","tilt_cmd_deg","mean_cx","mean_cy","err_x_px","err_y_px","W","H","n_dets"]
-            )
-            self._pointing_logging = True
-            ui_q.put(("toast", f"[Point] logging → {path} (preview 켜고 YOLO ON 하면 기록)"))
-        except Exception as e:
-            self._pointing_logging = False
-            ui_q.put(("toast", f"[Point] 로그 시작 실패: {e}"))
     def _interp_fit(self, fmap: dict, q: float, key_slope: str, k: int = 2):
         """근처 k개 키로 1/d 가중 평균 보간 (기울기 a 또는 e 추정)."""
         import numpy as np
@@ -2043,9 +1886,6 @@ class App:
     def _centering_on_centroid(self, m_cx: float, m_cy: float, W: int, H: int):
         """프리뷰에서 평균점 얻을 때마다 호출 → 작은 각도 스텝으로 중앙 수렴."""
         import time, numpy as np
-        if not self.centering_enable.get():
-            self._centering_ok_frames = 0
-            return
 
         # 중앙 오차(px)
         ex = (W/2.0) - float(m_cx)
@@ -2099,10 +1939,6 @@ class App:
         pan: 중앙(W/2) 기준
         tilt: (H/2 + Δy) 기준  ← Δy = self.laser_target_y_offset_px
         """
-        import time, numpy as np
-        if not self.centering_enable.get():
-            self._centering_ok_frames = 0
-            return
 
         # 목표 좌표
         target_x = W/2.0
@@ -2220,9 +2056,6 @@ class App:
         레이저 (lx, ly)를 타깃 (tx, ty) = '필름 중심'으로 정렬.
         px 오차 → a,e로 각도 환산 → 쿨다운/클램프 → 이동
         """
-        import time, numpy as np
-        if not self.centering_enable.get():
-            return
 
         ex = float(tx) - float(lx)
         ey = float(ty) - float(ly)
@@ -2260,3 +2093,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
