@@ -1,8 +1,6 @@
-# 🎯 PTCamera_waveshare
+# 🎯 PTCamera_waveshare: Optical WPT Targeting System
 
-**Waveshare Pan-Tilt 카메라 모듈 제어 시스템**
-
-OpenCV와 YOLO를 활용한 자동 타겟팅 및 레이저 포인팅 시스템
+**Waveshare Pan-Tilt 카메라 모듈을 활용한 광학 무선 전력 전송(Optical WPT) 자동 타겟팅 시스템**
 
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
 [![OpenCV](https://img.shields.io/badge/OpenCV-4.x-green.svg)](https://opencv.org/)
@@ -10,179 +8,99 @@ OpenCV와 YOLO를 활용한 자동 타겟팅 및 레이저 포인팅 시스템
 
 ---
 
-## 📋 목차
+## 📋 프로젝트 개요
 
-- [프로젝트 개요](#-프로젝트-개요)
-- [주요 기능](#-주요-기능)
-- [시스템 아키텍처](#-시스템-아키텍처)
-- [설치 방법](#-설치-방법)
-- [사용법](#-사용법)
-- [디렉토리 구조](#-디렉토리-구조)
-- [리팩토링](#-리팩터링-refactoring)
-- [향후 개선 사항](#-향후-개선-사항)
+이 프로젝트는 **Optical Wireless Power Transfer (OWPT)** 시스템을 위한 자동 정밀 타겟팅 솔루션입니다. 컴퓨터 비전(OpenCV)과 딥러닝(YOLO)을 결합하여 반사판(Receiver)을 실시간으로 탐지하고, 레이저를 정확하게 조준하여 전력 전송 효율을 극대화합니다.
+
+### 🌟 핵심 목표
+- **자동화 (Automation)**: 스캔부터 정밀 조준까지 원클릭 실행
+- **정확성 (Precision)**: 왜곡 보정 및 정밀 피드백 제어
+- **속도 (Speed)**: GPU 가속 및 하이브리드 탐지 알고리즘 적용
 
 ---
 
-## 🎯 프로젝트 개요
+## ⚙️ 시스템 아키텍처
 
-이 프로젝트는 [Waveshare 2-Axis Pan-Tilt 카메라 모듈](https://www.waveshare.com/2-axis-pan-tilt-camera-module.htm)을 사용하여 **자동 객체 탐지**, **왜곡 보정**, **정밀 타겟팅**을 수행하는 광학 무선 전력 전송(Optical WPT) 시스템입니다.
+Windows PC(클라이언트)가 중앙 제어를 담당하며, 중계 서버를 통해 Raspberry Pi(에이전트)와 통신하여 Pan-Tilt 모듈을 제어합니다.
 
-### 핵심 목표
-- 📷 **실시간 객체 인식**: YOLO 기반 반사판 자동 탐지
-- 🎯 **정밀 타겟팅**: CSV 데이터 기반 선형 피팅 알고리즘
-- 🔧 **왜곡 보정**: 카메라 캘리브레이션 및 실시간 보정
-- ⚡ **GPU 가속**: CUDA 지원으로 성능 최적화
-- 🔄 **자동 시퀀스**: 스캔부터 타겟팅까지 원클릭 자동화
+```mermaid
+graph LR
+    Client[🖥️ GUI Client\n(Windows PC)] <-->|Socket| Server[📡 Relay Server]
+    Server <-->|Socket| Pi[🍓 Raspberry Pi\n(Agent)]
+    Pi <-->|UART/GPIO| PT[📷 Pan-Tilt Camera\n(ESP32/Motor)]
+```
 
 ---
 
 ## ✨ 주요 기능
 
-### 1. **Auto Sequence (자동 시퀀스)**
-- **One-Click Operation**: 버튼 하나로 전체 프로세스 실행
-- **Workflow**: Scan → Compute Target → Move → Pointing
-- 각 단계별 자동 전환 및 에러 처리
+### 1. 🔄 Auto Sequence (자동 시퀀스)
+버튼 하나로 전체 타겟팅 과정을 자동으로 수행합니다.
+1. **Scan**: 설정된 범위를 스캔하며 이미지 수집 및 객체 탐지
+2. **Compute**: 탐지된 데이터를 분석하여 최적의 타겟 좌표 계산 (선형 회귀)
+3. **Move**: 계산된 타겟 위치로 고속 이동
+4. **Pointing**: 레이저를 켜고 미세 조정하여 정밀 타겟팅 완료
 
-### 2. **스캔 모드 (Scan)**
-- 지정된 각도 범위를 자동으로 스캔하여 이미지 수집
-- **실시간 YOLO 검출**: 이미지 수신 즉시 YOLO 처리 및 CSV 기록 (후처리 시간 0초)
-- **배치 처리**: 전체 이미지 1개 + 타일 6개를 한 번에 YOLO에 전달
-  - GPU 메모리 부족 시 자동 폴백 (7개 → 3개 → 1개)
-  - 처리 속도 **2~3배 향상**
-- **하이브리드 검출**:
-  - 전체 이미지 검출: 큰 객체 탐지
-  - 타일링 검출 (2x3): 작은 객체 탐지
-  - 검출률 **+20~30% 향상**
-- 스캔 중 흔들림 제어 (Accel, Settle 파라미터 조정)
+### 2. 📷 Scan Mode (스캔 모드)
+- **Hybrid Detection**: 전체 이미지와 분할(Tiling) 이미지를 동시에 분석하여 크고 작은 객체를 모두 놓치지 않고 탐지
+- **Real-time Logging**: 스캔과 동시에 CSV 데이터 기록 및 저장
+- **Optimization**: GPU 메모리 상태에 따른 배치 처리 자동 최적화
 
-### 3. **Pointing Mode (정밀 타겟팅)**
-- **SAHI (Slicing Aided Hyper Inference) 기법 적용**:
-    - 고해상도 이미지를 6등분(2x3) 타일링하여 YOLO 추론
-- 왜곡 보정 적용/해제
-- Alpha/Balance 파라미터 조정
+### 3. 🎯 Pointing Mode (정밀 타겟팅)
+타겟 위치로 이동 후, 레이저와 타겟의 오차를 실시간으로 보정합니다.
+- **Laser Detection**: 차분 이미지(Difference Image)와 밝기 무게중심(Moments)을 이용한 고속 레이저 위치 검출
+- **Feedback Loop**: 레이저 위치와 타겟(YOLO 검출) 사이의 오차를 계산하여 Pan-Tilt 미세 조정
+- **Robustness**: 검출 실패 시 무작위 이동 없이 제자리에서 재시도(Retry)하여 안정성 확보
+- **Debug Visualization**: 레이저 및 타겟 검출 과정을 시각화한 디버그 이미지 자동 저장
 
----
-
-## 🏗️ 시스템 아키텍처
-
-```
-┌─────────────────┐      Socket (JSON/Binary)      ┌──────────────────┐
-│   GUI Client    │ ◄───────────────────────────── │  Server (Broker) │
-│   (Windows PC)  │                                 │   (노트북/PC)     │
-│                 │                                 │                  │
-│ • Tkinter UI    │                                 │ • 제어 중계      │
-│ • YOLO 처리     │                                 │ • 이미지 중계    │
-│ • 왜곡 보정     │                                 │                  │
-│ • Auto Sequence │                                 │                  │
-└─────────────────┘                                 └──────────────────┘
-                                                             │
-                                                             │ Socket
-                                                             ▼
-                                                    ┌──────────────────┐
-                                                    │  Pi Agent        │
-                                                    │  (Raspberry Pi)  │
-                                                    │                  │
-                                                    │ • Picamera2      │
-                                                    │ • 시리얼 통신    │
-                                                    │ • GPIO 제어      │
-                                                    └──────────────────┘
-                                                             │
-                                                             │ Serial (UART)
-                                                             ▼
-                                                    ┌──────────────────┐
-                                                    │  ESP32 (Motor)   │
-                                                    │                  │
-                                                    │ • Pan-Tilt 제어  │
-                                                    │ • LED 제어       │
-                                                    └──────────────────┘
-```
+### 4. 🔧 Image Processing (이미지 처리)
+- **Undistortion**: 카메라 렌즈 왜곡을 실시간으로 보정 (Calibration 데이터 기반)
+- **Difference Imaging**: LED On/Off 이미지를 차분하여 주변광 노이즈 제거 및 반사판 식별력 강화
 
 ---
 
-## 🚀 설치 방법
+## 🚀 설치 및 실행 방법
 
-### 사전 요구사항
+### 1. 환경 설정
 
 **Windows (GUI Client)**
+- Python 3.8 이상
+- CUDA Toolkit (NVIDIA GPU 사용 시 권장)
 ```bash
-Python 3.8+
-CUDA Toolkit (선택, GPU 가속용)
+pip install opencv-python opencv-contrib-python numpy pillow ultralytics torch torchvision
 ```
 
-**Raspberry Pi**
+**Raspberry Pi (Agent)**
+- Python 3.8 이상
+- Picamera2, RPi.GPIO
 ```bash
-Python 3.8+
-Picamera2
-RPi.GPIO
-```
-
-### GUI 클라이언트 설치
-
-```bash
-# 1. 저장소 클론
-git clone https://github.com/leontnhaps/PTCamera_waveshare.git
-cd PTCamera_waveshare
-
-# 2. 가상환경 생성 (권장)
-python -m venv venv
-venv\Scripts\activate  # Windows
-# source venv/bin/activate  # Linux/Mac
-
-# 3. 의존성 설치
-pip install opencv-python opencv-contrib-python
-pip install numpy pillow
-pip install ultralytics  # YOLO
-pip install torch torchvision  # GPU 가속용 (선택)
-
-# 4. GUI 실행
-cd Com
-python auto_sequence.py
-```
-
-### Raspberry Pi 에이전트 설치
-
-```bash
-# 1. Picamera2 설치
-sudo apt update
-sudo apt install -y python3-picamera2
-
-# 2. 의존성 설치
+sudo apt install python3-picamera2
 pip3 install pyserial
-
-# 3. 에이전트 실행
-cd Raspberrypi
-python3 test.py
 ```
 
-### 서버 실행
+### 2. 실행 순서
 
+시스템은 **Server → Agent → Client** 순서로 실행해야 합니다.
+
+**Step 1: 중계 서버 실행**
 ```bash
 cd Server
 python test.py
 ```
 
----
-
-## 💡 사용법
-
-### 1. 기본 워크플로우
-
+**Step 2: Raspberry Pi 에이전트 실행**
 ```bash
-# 1단계: 서버 시작
-cd Server
-python test.py
-
-# 2단계: Raspberry Pi 에이전트 시작
-ssh pi@<raspberry-pi-ip>
+# 라즈베리파이에서 실행
 cd Raspberrypi
 python3 test.py
-
-# 3단계: GUI 클라이언트 시작
-cd Com
-python auto_sequence.py
 ```
 
-- **ERTest.py**: 이미지 처리 알고리즘(Diff, Threshold 등) 단위 테스트
+**Step 3: GUI 클라이언트 실행**
+```bash
+# Windows PC에서 실행
+cd Refactoring/Com
+python Com_main.py
+```
 
 ---
 
@@ -190,169 +108,22 @@ python auto_sequence.py
 
 ```
 PTCamera_waveshare/
-├── 📁 Com/                      # 메인 GUI 클라이언트 (Windows)
-│   ├── auto_sequence.py         # ✨ 통합 자동화 스크립트 (메인)
-│   ├── Com_main.py              # 레거시 GUI
-│   └── test.py                  # 테스트용 GUI
+├── 📁 Refactoring/              # ✨ 메인 소스 코드 (리팩토링 완료)
+│   ├── 📁 Com/                  # Windows GUI 클라이언트
+│   │   ├── Com_main.py          # 메인 실행 파일
+│   │   └── test.py              # (Com_main.py와 동일)
+│   ├── 📁 Raspberrypi/          # Raspberry Pi 에이전트 코드
+│   └── 📁 Server/               # 중계 서버 코드
 │
-├── 📁 Server/                   # 중계 서버
-│   └── test.py
-│
-├── 📁 Raspberrypi/              # 라즈베리파이 에이전트
-│   └── test.py
-│
-├── 📁 Experiments/              # 🧪 실험용 코드 및 도구
-│   ├── undistort_gui.py         # 왜곡 보정 도구
-│   ├── generate_diff_dataset.py # 데이터셋 생성기
-│   ├── diff_*.py                # 다양한 이미지 처리 튜너
+├── 📁 Experiments/              # 🧪 실험 및 유틸리티 도구
+│   ├── undistort_gui.py         # 왜곡 보정 테스트 도구
+│   ├── generate_diff_dataset.py # 학습 데이터셋 생성기
 │   └── ...
 │
-├── 📁 Refactoring/              # 🔧 리팩토링 코드 (새로 추가)
-│   ├── Com/Com_main.py          # 정리된 GUI (1680줄, -226줄)
-│   ├── Raspberrypi/Rasp_main.py # 서버 IP 선택 기능 추가
-│   └── Server/Server_main.py    # 미사용 import 제거
-│
-├── 📁 Docs/                     # 📄 문서 및 논문
-│
-├── 📄 calib.npz                 # 카메라 보정 파일
-├── 📄 yolov11m_diff.pt          # YOLO 모델 (Diff 학습)
-└── 📄 README.md
+├── 📄 calib.npz                 # 카메라 캘리브레이션 데이터
+├── 📄 yolov11m_diff.pt          # YOLO 학습 모델 가중치
+└── 📄 README.md                 # 프로젝트 문서
 ```
-
----
-
-## 🔧 리팩토링 (Refactoring)
-
-### 📁 `Refactoring/` 폴더
-
-**목적**: 원본 코드를 보존하면서 안전하게 코드 개선 작업 수행
-
-```
-Refactoring/
-├── Com/
-│   └── Com_main.py (1680줄, -226줄 from original)
-├── Raspberrypi/
-│   └── Rasp_main.py (383줄, +25줄 with new features)
-└── Server/
-    └── Server_main.py (226줄, -1줄)
-```
-
-### 📊 리팩토링 요약
-
-**Phase 3-4: 스캔 최적화 구조 개선**
-- `ImageProcessor` (231줄): 이미지 로딩/왜곡보정, CUDA/Torch 가속
-- `YOLOProcessor` (34줄): YOLO 모델 관리/캐싱
-- `ScanController` (154줄): 실시간 스캔 처리
-- 상수 추출: 23개 매직 넘버 제거
-- 코드 감소: ~120줄
-- 타일 생성 로직 수정: 12개 → 6개 (rows x cols 정확히 유지)
-- 오버랩 처리 개선: step 감소 대신 확장으로 변경
-
-**코드 정리 및 기능 추가**
-
-| 컴포넌트 | 작업 내용 | Before | After | 변화 |
-|---------|---------|--------|-------|------|
-| **Com** | 미사용 함수 5개 + import 3개 삭제 | 1906줄 | 1680줄 | **-226줄 (-11.9%)** |
-| **Raspberrypi** | 서버 IP 선택 메뉴 추가 | 358줄 | 383줄 | +25줄 (기능 추가) |
-| **Server** | 미사용 import 1개 삭제 | 227줄 | 226줄 | -1줄 |
-| **합계** | | 2491줄 | 2289줄 | **-202줄 (-8.1%)** |
-
-#### Com/Com_main.py
-
-**삭제된 미사용 함수 (235줄):**
-- `_centering_on_laser()` (54줄)
-- `_detect_red_laser()` (68줄)
-- `_align_laser_to_film()` (37줄)
-- `_centering_on_centroid()` (52줄)
-- `_interp_fit()` (13줄)
-
-**삭제된 미사용 import (3개):**
-- `struct`, `io`, `ImageDraw`
-
-#### Raspberrypi/Rasp_main.py
-
-**새로운 기능: 서버 IP 선택 메뉴**
-
-실행 시 서버를 대화형으로 선택 가능:
-```
-==================================================
-서버 선택 (Server Selection)
-==================================================
-  [1] 711a       → 192.168.0.9
-  [2] 602a       → 172.30.1.13
-  [3] hotspot    → 10.95.38.118
-==================================================
-서버 번호를 선택하세요 (1/2/3) [기본값: 2]: 
-```
-
-**장점:**
-- 코드 수정 없이 서버 전환
--  실수 방지 (잘못된 입력 재요청)
-- 환경 변수로 우회 가능
-
-#### Server/Server_main.py
-
-**삭제된 미사용 import:**
-- `os` (사용되지 않음)
-
-### 🗂️ Experiments 폴더 정리
-
-**Before (17개 파일):**
-- GPIO.py, HSV.py, diff_gemini.py, diff_hsv_tuner.py, diff_image_red.py, diff_image_yellow.py, diff_rgb_tuner.py, diff_rgb_two.py, diff_universe.py, generate_diff_dataset.py, image_diff.py, laserdiff.py, last_filter.py, modify_test.py, rate_image.py, undistort_gui.py, yolo_test_folder.py
-
-**After (13개 파일, 통일된 명명 규칙):**
-- `Laser_GPIO.py` - GPIO 테스트
-- `SAHI_yolo_test.py` - YOLO 타일링 테스트
-- `diff_filter_1_2.py` - Universe + RGB Two 통합 필터
-- `diff_filter_hsv.py` - HSV 필터 튜너
-- `diff_filter_red.py` - Red 필터 튜너
-- `diff_filter_red_yellow.py` - Red & Yellow 통합 필터
-- `diff_filter_rgb.py` - RGB 필터 튜너
-- `diff_filter_yellow.py` - Yellow 필터 튜너
-- `diff_laser.py` - 차분 이미지 레이저 검출
-- `generate_diff_dataset.py` - YOLO 학습 데이터셋 생성
-- `rate_image.py` - 비율 기반 이미지 분석
-- `undistort_gui.py` - 왜곡 보정 GUI  도구
-- `view_diff.py` - 차분 이미지 뷰어
-
-**변경 사항:**
-- ✅ 파일명 통일 (`diff_filter_*` 패턴)
-- ✅ 중복/구형 파일 제거 (4개)
-- ✅ 기능별 분류 명확화
-
-**Phase 5: Pointing Mode 로직 개선**
-- **레이저 검출 단순화**: 복잡한 ROI/Contour 제거 → 차분 이미지 밝기 무게중심(Moments) 방식 적용 (속도/정확도 향상)
-- **에러 핸들링 강화**: 검출 실패 시 무작위 이동 대신 제자리 재시도(Retry) 로직 적용
-- **디버깅 기능 강화**:
-  - `debug_laser_ud_TIMESTAMP.jpg`: 레이저 검출 위치 시각화 저장
-  - `debug_target_ud_TIMESTAMP.jpg`: 타겟 및 오차 시각화 저장
-- **편의성 개선**: CSV 수동 로드 버튼 추가
-
-### 🔒 리팩토링 원칙
-
-1. **작업 위치 엄수**: `Refactoring/` 폴더만 수정
-2. **원본 보존**: `Com/`, `Raspberrypi/`, `Server/` 절대 수정 금지
-3. **기능 보장**: 모든 기능 유지 또는 개선 (저하 없음)
-
-### 🎯 검증 완료
-
-- ✅ **스레드 안전성**: 전체 시스템 스레딩 분석 완료
-- ✅ **코드 품질**: 미사용 코드 제거, 중복 최소화
-- ✅ **기능 테스트**: 원본과 동일하게 작동
-- ✅ **메모리/성능**: 영향 없음
-
----
-
-## 🔬 향후 개선 사항
-
-### 연구 필요
-
-1. **다중 객체 인식**
-   - 여러 개의 반사판 동시 추적
-   - 우선순위 기반 타겟 선택
-
-2. **무선 전력 전송 효율 확인**
-   - 솔라 셀에 전압, 전류계로 효율 확인
 
 ---
 
@@ -367,5 +138,3 @@ Refactoring/
 **leontnhaps**
 - GitHub: [@leontnhaps](https://github.com/leontnhaps)
 - Repository: [PTCamera_waveshare](https://github.com/leontnhaps/PTCamera_waveshare)
-
----
