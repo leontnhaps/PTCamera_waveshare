@@ -320,6 +320,14 @@ Refactoring/
 - ✅ 중복/구형 파일 제거 (4개)
 - ✅ 기능별 분류 명확화
 
+**Phase 5: Pointing Mode 로직 개선**
+- **레이저 검출 단순화**: 복잡한 ROI/Contour 제거 → 차분 이미지 밝기 무게중심(Moments) 방식 적용 (속도/정확도 향상)
+- **에러 핸들링 강화**: 검출 실패 시 무작위 이동 대신 제자리 재시도(Retry) 로직 적용
+- **디버깅 기능 강화**:
+  - `debug_laser_ud_TIMESTAMP.jpg`: 레이저 검출 위치 시각화 저장
+  - `debug_target_ud_TIMESTAMP.jpg`: 타겟 및 오차 시각화 저장
+- **편의성 개선**: CSV 수동 로드 버튼 추가
+
 ### 🔒 리팩토링 원칙
 
 1. **작업 위치 엄수**: `Refactoring/` 폴더만 수정

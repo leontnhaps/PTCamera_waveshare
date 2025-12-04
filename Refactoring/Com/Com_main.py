@@ -8,7 +8,7 @@ from tkinter import ttk
 from PIL import Image, ImageTk, ImageDraw
 import tkinter as tk  # ← 추가
 import os, re, csv, time   # ← 추가
-
+from datetime import datetime
 import numpy as np
 import cv2
 
@@ -907,6 +907,10 @@ class App:
         self._pointing_log_fp = None
         self._pointing_log_writer = None
         self._pointing_logging = False
+        
+        # Pointing State
+        self._pointing_state = 0
+        self._pointing_last_ts = 0
 
         # (선택) 현재 명령 각도 기억
         self._curr_pan = 0.0
@@ -916,9 +920,9 @@ class App:
         self._fits_v = {}
         
         # Pointing mode settings
-        self.pointing_px_tol = IntVar(value=5)
+        self.pointing_px_tol = IntVar(value=7)
         self.pointing_min_frames = IntVar(value=4)
-        self.pointing_max_step = DoubleVar(value=1.0)
+        self.pointing_max_step = DoubleVar(value=5.0)
         self.pointing_cooldown = IntVar(value=250)
 
 
@@ -1023,9 +1027,13 @@ class App:
         self.point_result_lbl = ttk.Label(point_csv_frame, text="Result: -")
         self.point_result_lbl.pack(anchor="w", padx=5, pady=5)
         
+        # CSV 파일 선택 버튼 ← 여기 추가!
+        ttk.Button(point_csv_frame, text="Load CSV", 
+        command=self.pointing_choose_csv).pack(anchor="w", padx=5, pady=2)
+
         # [RESTORED] Move to Target Button
         ttk.Button(point_csv_frame, text="Move to Target", command=self.pointing_move).pack(anchor="w", padx=5, pady=5)
-
+     
 
 
 
@@ -1073,7 +1081,7 @@ class App:
         """픽셀 오차 → 각도 변환 (클램핑 포함)"""
         d_pan = err_x * k_pan
         d_tilt = -err_y * k_tilt
-        max_step = self.centering_max_step.get()
+        max_step = self.pointing_max_step.get()
         d_pan = max(min(d_pan, max_step), -max_step)
         d_tilt = max(min(d_tilt, max_step), -max_step)
         return d_pan, d_tilt
@@ -1288,32 +1296,35 @@ class App:
     # (_start_centering_cycle and _snap_center_on are defined later - removed duplicate)
 
     def _find_laser_center(self, img_on, img_off, roi_size=200):
-        h, w = img_on.shape[:2]
-        cx, cy = w // 2, h // 2
-        half = roi_size // 2
-        x1 = max(0, cx - half); y1 = max(0, cy - half)
-        x2 = min(w, cx + half); y2 = min(h, cy + half)
+        """
+        Find laser center using brightness centroid from diff image.
+        No ROI, no Contour, just moments of diff grayscale.
+        """
+        # ROI: 화면 상반부만
+        H, W = img_on.shape[:2]
+        roi_h = H // 2  # 상반부 (위쪽 절반)
         
-        roi_on = img_on[y1:y2, x1:x2]
-        roi_off = img_off[y1:y2, x1:x2]
+        roi_on = img_on[0:roi_h, :]   # 상반부
+        roi_off = img_off[0:roi_h, :]
         
-        g1 = cv2.cvtColor(roi_on, cv2.COLOR_BGR2GRAY)
-        g2 = cv2.cvtColor(roi_off, cv2.COLOR_BGR2GRAY)
-        g1 = cv2.GaussianBlur(g1, (5,5), 0)
-        g2 = cv2.GaussianBlur(g2, (5,5), 0)
-        diff = cv2.absdiff(g1, g2)
-        _, bin_img = cv2.threshold(diff, 30, 255, cv2.THRESH_BINARY)
+        # Calculate difference image
+        diff = cv2.absdiff(roi_on, roi_off)
         
-        contours, _ = cv2.findContours(bin_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours: return None
+        # Convert to grayscale
+        gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
         
-        largest = max(contours, key=cv2.contourArea)
-        M = cv2.moments(largest)
-        if M["m00"] == 0: return None
+        cv_thresh = 30
+        _, binary = cv2.threshold(gray, cv_thresh, 255, cv2.THRESH_BINARY)
+
+        # Calculate brightness centroid using moments
+        M = cv2.moments(binary)
+        if M["m00"] == 0:
+            return None
         
-        lcx = int(M["m10"] / M["m00"])
-        lcy = int(M["m01"] / M["m00"])
-        return (lcx + x1, lcy + y1)
+        cx = int(M["m10"] / M["m00"])
+        cy = int(M["m01"] / M["m00"])
+        
+        return (cx, cy)
 
     # ==== Pointing Mode Logic ====
     def _start_pointing_cycle(self):
@@ -1333,14 +1344,8 @@ class App:
             laser_pos = self._find_laser_center(img_on, img_off, self.pointing_roi_size.get())
             
             if laser_pos is None:
-                # Blind Search: Tilt Down 1 deg
-                ui_q.put(("toast", "⚠️ Laser not found -> Blind Search (Tilt -1°)"))
-                next_tilt = self._curr_tilt - 1.0
-                next_tilt = max(-30, min(90, next_tilt)) # Limit
-                self._curr_tilt = next_tilt
-                self.ctrl.send({"cmd":"move", "pan":self._curr_pan, "tilt":next_tilt, "speed":self.speed.get(), "acc":float(self.acc.get())})
-                
-                # End cycle, wait for cooldown
+                # Laser not found -> Retry cycle (no movement)
+                ui_q.put(("toast", "⚠️ Laser not found -> Retry"))
                 self._pointing_state = 0
                 self._pointing_last_ts = time.time() * 1000
                 return
@@ -1349,6 +1354,16 @@ class App:
             self._laser_px = laser_pos
             ui_q.put(("toast", f"✅ Laser Found: {laser_pos}"))
             
+            # [DEBUG] Save laser visualization (UD applied!)
+            
+            diff_laser = cv2.absdiff(img_on, img_off)  # img_on, img_off는 이미 UD 적용됨!
+            debug_laser = cv2.cvtColor(diff_laser, cv2.COLOR_BGR2RGB) if len(diff_laser.shape) == 3 else cv2.cvtColor(diff_laser, cv2.COLOR_GRAY2BGR)
+            cv2.circle(debug_laser, laser_pos, 10, (0, 255, 0), 3)  # 녹색 원
+            cv2.drawMarker(debug_laser, laser_pos, (0, 255, 0), cv2.MARKER_CROSS, 40, 3)  # 십자 마커
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # 밀리초 포함
+            debug_path = DEFAULT_OUT_DIR / f"debug_laser_ud_{ts}.jpg"
+            cv2.imwrite(str(debug_path), debug_laser)
+            print(f"[DEBUG] Laser saved (UD): {debug_path}, pos={laser_pos}")
             # Trigger LED ON
             ui_q.put(("pointing_step_2", None))
             
@@ -1421,15 +1436,34 @@ class App:
             
             err_x = target_px[0] - self._laser_px[0]
             err_y = target_px[1] - self._laser_px[1]
-            
+            # [DEBUG] Save target visualization (UD applied!)
+            debug_target = diff.copy()  # diff는 이미 UD 적용된 img_on, img_off의 차분!
+            debug_target = cv2.cvtColor(debug_target, cv2.COLOR_GRAY2BGR) if len(debug_target.shape) == 2 else debug_target
+            # 타겟 위치 (빨간색)
+            cv2.circle(debug_target, (int(target_px[0]), int(target_px[1])), 12, (0, 0, 255), 3)
+            cv2.drawMarker(debug_target, (int(target_px[0]), int(target_px[1])), (0, 0, 255), cv2.MARKER_CROSS, 50, 3)
+            cv2.putText(debug_target, "TARGET", (int(target_px[0])+15, int(target_px[1])-15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            # 레이저 위치 (녹색)
+            cv2.circle(debug_target, self._laser_px, 12, (0, 255, 0), 3)
+            cv2.drawMarker(debug_target, self._laser_px, (0, 255, 0), cv2.MARKER_CROSS, 50, 3)
+            cv2.putText(debug_target, "LASER", (self._laser_px[0]+15, self._laser_px[1]-15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            # 객체 BBox (노란색)
+            cv2.rectangle(debug_target, (int(x), int(y)), (int(x+w), int(y+h)), (0, 255, 255), 3)
+            cv2.putText(debug_target, "OBJECT", (int(x), int(y)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            # 오차 표시
+            cv2.putText(debug_target, f"Err: ({err_x:.1f}, {err_y:.1f})", (30, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # 밀리초 포함
+            debug_path = DEFAULT_OUT_DIR / f"debug_target_ud_{ts}.jpg"
+            cv2.imwrite(str(debug_path), debug_target)
+            print(f"[DEBUG] Target saved (UD): {debug_path}, L={self._laser_px}, T={target_px}")
             ui_q.put(("toast", f"Err:({err_x:.1f}, {err_y:.1f}) L:{self._laser_px} T:{target_px}"))
             
             # Convergence
-            tol = self.centering_px_tol.get()
+            tol = self.pointing_px_tol.get()
             if abs(err_x) <= tol and abs(err_y) <= tol:
                 self._pointing_stable_cnt += 1
-                ui_q.put(("toast", f"✅ Pointing Converging... {self._pointing_stable_cnt}/{self.centering_min_frames.get()}"))
-                if self._pointing_stable_cnt >= self.centering_min_frames.get():
+                ui_q.put(("toast", f"✅ Pointing Converging... {self._pointing_stable_cnt}/{self.pointing_min_frames.get()}"))
+                if self._pointing_stable_cnt >= self.pointing_min_frames.get():
                     ui_q.put(("toast", "🎉 Pointing Complete!"))
                     self.pointing_enable.set(False); ui_q.put(("preview_on", None))
                     self.ctrl.send({"cmd":"laser", "value":0}); self.laser_on.set(False)
@@ -1467,7 +1501,7 @@ class App:
         """Check and trigger pointing cycle if needed"""
         if self.pointing_enable.get() and self._pointing_state == 0:
             now = time.time() * 1000
-            if now - self._pointing_last_ts > self.centering_cooldown.get():
+            if now - self._pointing_last_ts > self.pointing_cooldown.get():
                 self._start_pointing_cycle()
     
     def _handle_hello_event(self, evt):
@@ -1722,6 +1756,7 @@ class App:
         path = filedialog.askopenfilename(filetypes=[("CSV","*.csv")])
         if path:
             self.point_csv_path.set(path)
+            self.pointing_compute()
 
     @staticmethod
     def _linfit_xy(x, y):
@@ -1883,174 +1918,6 @@ class App:
         w = 1.0 / d
         return float(np.sum(sel_v * w) / np.sum(w))
 
-    def _centering_on_centroid(self, m_cx: float, m_cy: float, W: int, H: int):
-        """프리뷰에서 평균점 얻을 때마다 호출 → 작은 각도 스텝으로 중앙 수렴."""
-        import time, numpy as np
-
-        # 중앙 오차(px)
-        ex = (W/2.0) - float(m_cx)
-        ey = (H/2.0) - float(m_cy)
-        tol = int(self.centering_px_tol.get())
-
-        # 안정 프레임 카운트
-        if abs(ex) <= tol and abs(ey) <= tol:
-            self._centering_ok_frames += 1
-        else:
-            self._centering_ok_frames = 0
-
-        # 충분히 안정되면 종료 메시지(선택)
-        if self._centering_ok_frames >= int(self.centering_min_frames.get()):
-            return
-
-        # 쿨다운(명령 과다 방지)
-        now_ms = int(time.time() * 1000)
-        if now_ms - self._centering_last_ms < int(self.centering_cooldown.get()):
-            return
-
-        # px/deg 기울기 추정: a=∂cx/∂pan (tilt근방), e=∂cy/∂tilt (pan근방)
-        a = self._interp_fit(getattr(self, "_fits_h", {}), self._curr_tilt, "a", k=2)
-        e = self._interp_fit(getattr(self, "_fits_v", {}), self._curr_pan,  "e", k=2)
-
-        # 기울기 없으면 보수적으로 스킵
-        if not np.isfinite(a) or abs(a) < 1e-6 or not np.isfinite(e) or abs(e) < 1e-6:
-            return
-
-        # 각도 보정량(°)
-        dpan  = float(np.clip(ex / a, -float(self.centering_max_step.get()), float(self.centering_max_step.get())))
-        dtilt = float(np.clip(ey / e, -float(self.centering_max_step.get()), float(self.centering_max_step.get())))
-
-        # 현재 명령 각도 업데이트
-        self._curr_pan  = float(self._curr_pan  + dpan)
-        self._curr_tilt = float(self._curr_tilt + dtilt)
-
-        # 이동 명령
-        self.ctrl.send({
-            "cmd":"move",
-            "pan":  self._curr_pan,
-            "tilt": self._curr_tilt,
-            "speed": int(self.point_speed.get()),
-            "acc":   float(self.point_acc.get())
-        })
-        self._centering_last_ms = now_ms
-
-    def _centering_on_laser(self, lx: float, ly: float, W: int, H: int):
-        """
-        레이저 점(lx,ly) 기준 정밀 보정.
-        pan: 중앙(W/2) 기준
-        tilt: (H/2 + Δy) 기준  ← Δy = self.laser_target_y_offset_px
-        """
-
-        # 목표 좌표
-        target_x = W/2.0
-        target_y = H/2.0 + float(self.laser_target_y_offset_px.get())
-
-        # 오차(px)
-        ex = (target_x - float(lx))
-        ey = (target_y - float(ly))
-        tol = int(self.centering_px_tol.get())
-
-        # 안정 판정
-        if abs(ex) <= tol and abs(ey) <= tol:
-            self._centering_ok_frames += 1
-        else:
-            self._centering_ok_frames = 0
-        if self._centering_ok_frames >= int(self.centering_min_frames.get()):
-            return
-
-        # 쿨다운
-        now_ms = int(time.time() * 1000)
-        if now_ms - self._centering_last_ms < int(self.centering_cooldown.get()):
-            return
-
-        # px/deg 추정: a=∂cx/∂pan, e=∂cy/∂tilt (CSV에서 회귀한 값 보간)
-        a = self._interp_fit(getattr(self, "_fits_h", {}), self._curr_tilt, "a", k=2)
-        e = self._interp_fit(getattr(self, "_fits_v", {}), self._curr_pan,  "e", k=2)
-        if not np.isfinite(a) or abs(a) < 1e-6 or not np.isfinite(e) or abs(e) < 1e-6:
-            return
-
-        # 각도 보정량(°) 클램프
-        dpan  = float(np.clip(ex / a, -float(self.centering_max_step.get()), float(self.centering_max_step.get())))
-        dtilt = float(np.clip(ey / e, -float(self.centering_max_step.get()), float(self.centering_max_step.get())))
-
-        # 누적/전송
-        self._curr_pan  = float(self._curr_pan  + dpan)
-        self._curr_tilt = float(self._curr_tilt + dtilt)
-        self.ctrl.send({
-            "cmd":"move",
-            "pan":  self._curr_pan,
-            "tilt": self._curr_tilt,
-            "speed": int(self.point_speed.get()),
-            "acc":   float(self.point_acc.get())
-        })
-        self._centering_last_ms = now_ms
-    def _detect_red_laser(self, bgr: np.ndarray):
-        """
-        빨간 레이저 포인트를 HSV 두 구간(0~H1, H2~180) + S/V 임계로 마스크한 뒤
-        연결요소에서 '점수 = 평균 V * 면적'이 가장 큰 blob의 subpixel 중심을 반환.
-        반환: (found: bool, cx: float, cy: float, score: float)
-        """
-        try:
-            hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-            H1_lo, H1_hi = int(self.laser_h_lo1.get()), int(self.laser_h_hi1.get())
-            H2_lo, H2_hi = int(self.laser_h_lo2.get()), int(self.laser_h_hi2.get())
-            S_min, V_min = int(self.laser_s_min.get()), int(self.laser_v_min.get())
-
-            h, s, v = cv2.split(hsv)
-
-            # 빨강 hue는 양끝단에 걸려서 두 구간 합침
-            m1 = cv2.inRange(h, H1_lo, H1_hi)
-            m2 = cv2.inRange(h, H2_lo, H2_hi)
-            mh = cv2.bitwise_or(m1, m2)
-
-            ms = cv2.inRange(s, S_min, 255)
-            mv = cv2.inRange(v, V_min, 255)
-
-            mask = cv2.bitwise_and(mh, cv2.bitwise_and(ms, mv))
-
-            # 모폴로지 오픈으로 노이즈 제거
-            ksz = max(0, int(self.laser_open_ksz.get()))
-            if ksz > 0:
-                k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2*ksz+1, 2*ksz+1))
-                mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k, iterations=1)
-
-            # 연결요소로 blob 스코어링
-            num, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
-            if num <= 1:
-                return (False, 0.0, 0.0, 0.0)
-
-            minA = int(self.laser_min_area.get())
-            maxA = int(self.laser_max_area.get())
-
-            best = (-1, -1.0)  # (idx, score)
-            for i in range(1, num):
-                x,y,w,h,a = stats[i]
-                if a < minA or a > maxA: 
-                    continue
-
-                # blob 평균 V를 계산해서 포화/광원과 구분(채도가 이미 크지만 보정)
-                mask_i = (labels == i).astype(np.uint8)
-                mean_v = float(cv2.mean(v, mask=mask_i)[0])
-                score = mean_v * float(a)  # 간단한 점수 함수
-
-                if score > best[1]:
-                    best = (i, score)
-
-            if best[0] < 0:
-                return (False, 0.0, 0.0, 0.0)
-
-            # subpixel 무게중심(밝기 가중치; V를 가중치로 사용)
-            i = best[0]
-            mask_i = (labels == i).astype(np.uint8)
-            ys, xs = np.nonzero(mask_i)
-            if xs.size == 0:
-                return (False, 0.0, 0.0, 0.0)
-            weights = v[ys, xs].astype(np.float32) + 1.0
-            cx = float(np.sum(xs * weights) / np.sum(weights))
-            cy = float(np.sum(ys * weights) / np.sum(weights))
-            return (True, cx, cy, float(best[1]))
-        except Exception as e:
-            print("[laser] detect err:", e)
-            return (False, 0.0, 0.0, 0.0)
     def _align_laser_to_film(self, lx: float, ly: float, tx: float, ty: float, W: int, H: int):
         """
         레이저 (lx, ly)를 타깃 (tx, ty) = '필름 중심'으로 정렬.
@@ -2062,7 +1929,7 @@ class App:
 
         # 쿨다운
         now_ms = int(time.time() * 1000)
-        if now_ms - self._centering_last_ms < int(self.centering_cooldown.get()):
+        if now_ms - self._pointing_last_ms < int(self.centering_cooldown.get()):
             return
 
         # px/deg 추정
@@ -2071,8 +1938,8 @@ class App:
         if not np.isfinite(a) or abs(a) < 1e-6 or not np.isfinite(e) or abs(e) < 1e-6:
             return
 
-        dpan  = float(np.clip(ex / a, -float(self.centering_max_step.get()), float(self.centering_max_step.get())))
-        dtilt = float(np.clip(ey / e, -float(self.centering_max_step.get()), float(self.centering_max_step.get())))
+        dpan  = float(np.clip(ex / a, -float(self.pointing_max_step.get()), float(self.pointing_max_step.get())))
+        dtilt = float(np.clip(ey / e, -float(self.pointing_max_step.get()), float(self.pointing_max_step.get())))
 
         self._curr_pan  = float(self._curr_pan  + dpan)
         self._curr_tilt = float(self._curr_tilt + dtilt)
@@ -2084,7 +1951,7 @@ class App:
             "speed": int(self.point_speed.get()),
             "acc":   float(self.point_acc.get())
         })
-        self._centering_last_ms = now_ms
+        self._pointing_last_ms = now_ms
 
 def main():
     root = Tk()
