@@ -26,9 +26,9 @@
 
 ```mermaid
 graph LR
-    Client[🖥️ PC Client\n(Brain: YOLO & Control Logic)] <-->|Socket| Server[📡 Relay Server]
-    Server <-->|Socket| Pi[🍓 Raspberry Pi Agent\n(Body: Camera & Motors)]
-    Pi <-->|UART/GPIO| PT[📷 Pan-Tilt Camera\n(ESP32 Driver)]
+    Client["🖥️ PC Client<br>(Brain: YOLO & Control Logic)"] <-->|Socket| Server["📡 Relay Server"]
+    Server <-->|Socket| Pi["🍓 Raspberry Pi Agent<br>(Body: Camera & Motors)"]
+    Pi <-->|UART/GPIO| PT["📷 Pan-Tilt Camera<br>(ESP32 Driver)"]
 ```
 
 ---
@@ -40,7 +40,7 @@ PTCamera_waveshare/
 ├── 📁 Com/                  # 🖥️ PC Client (핵심 로직)
 │   ├── Com_main.py          # 메인 GUI 및 제어 프로그램
 │   └── ...
-├── � Raspberrypi/          # 🍓 Raspberry Pi Agent
+├── 📁 Raspberrypi/          # 🍓 Raspberry Pi Agent
 │   ├── Rasp_main.py         # 하드웨어 제어 및 이미지 스트리밍
 │   └── ...
 ├── 📁 Server/               # 📡 Relay Server
