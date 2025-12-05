@@ -70,7 +70,7 @@ class PointingHandlerMixin:
         # 1. Laser ON
         self._pointing_state = 1 # WAIT_LASER_ON
         self.ctrl.send({"cmd":"laser", "value":1})
-        wait_ms = int(self.led_settle.get() * 1000)
+        wait_ms = int(self.point_settle.get() * 1000)
         self.root.after(wait_ms, lambda: self.ctrl.send({
             "cmd":"snap", "width":self.width.get(), "height":self.height.get(),
             "quality":self.quality.get(), "save":"pointing_laser_on.jpg"
@@ -405,7 +405,7 @@ class PointingHandlerMixin:
         except Exception:
             ui_q.put(("toast", "먼저 '가중평균 계산'으로 타깃을 구하세요."))
             return
-        spd = int(self.point_speed.get()); acc = float(self.point_acc.get())
+        spd = int(100); acc = float(1.0)
 
         # 현재 명령 각도 기억
         self._curr_pan, self._curr_tilt = pan_t, tilt_t

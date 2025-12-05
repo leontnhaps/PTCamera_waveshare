@@ -164,7 +164,7 @@ class EventHandlersMixin:
         
         # Trigger laser OFF
         self.ctrl.send({"cmd": "laser", "value": 0})
-        wait_ms = int(self.led_settle.get() * 1000)
+        wait_ms = int(self.point_settle.get() * 1000)
         self.root.after(wait_ms, lambda: self.ctrl.send({
             "cmd": "snap", "width": self.width.get(), "height": self.height.get(),
             "quality": self.quality.get(), "save": "pointing_laser_off.jpg",
@@ -184,14 +184,14 @@ class EventHandlersMixin:
         img_off = cv2.imdecode(np.frombuffer(self._pointing_img_laser_off, np.uint8), cv2.IMREAD_COLOR)
         self._run_pointing_laser_logic(img_on, img_off)
     
-    def _handle_pointing_step2(self):
+    def _handle_pointing_step2(self):   
         """Trigger LED ON for object detection"""
         if self._pointing_state != 3:
             return
         self._pointing_state = 4
         
         self.ctrl.send({"cmd": "led", "value": 255})
-        wait_ms = int(self.led_settle.get() * 1000)
+        wait_ms = int(self.point_settle.get() * 1000)
         self.root.after(wait_ms, lambda: self.ctrl.send({
             "cmd": "snap", "width": self.width.get(), "height": self.height.get(),
             "quality": self.quality.get(), "save": "pointing_led_on.jpg",
@@ -207,7 +207,7 @@ class EventHandlersMixin:
         self._set_preview(data)  # Show LED ON image
         
         self.ctrl.send({"cmd": "led", "value": 0})
-        wait_ms = int(self.led_settle.get() * 1000)
+        wait_ms = int(self.point_settle.get() * 1000)
         self.root.after(wait_ms, lambda: self.ctrl.send({
             "cmd": "snap", "width": self.width.get(), "height": self.height.get(),
             "quality": self.quality.get(), "save": "pointing_led_off.jpg",

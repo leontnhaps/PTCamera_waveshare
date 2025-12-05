@@ -145,9 +145,9 @@ class AppUIMixin:
         add_entry(point_set_frame, "Tolerance (px):", self.pointing_px_tol, 2)
         add_entry(point_set_frame, "Min Stable Frames:", self.pointing_min_frames, 3)
         add_entry(point_set_frame, "Max Step (deg):", self.pointing_max_step, 4)
-        add_entry(point_set_frame, "Cooldown (ms):", self.pointing_cooldown, 5)
-        add_entry(point_set_frame, "LED Settle (s):", self.led_settle, 6)
-        
+        add_entry(point_set_frame, "LED/LASER Settle (s):", self.point_settle, 5)
+        add_entry(point_set_frame, "Loop Interval (s):", self.pointing_interval, 6)
+
         # 2. Pointing Control
         point_ctrl_frame = ttk.LabelFrame(col2_frame, text="Pointing Control")
         point_ctrl_frame.pack(padx=5, pady=5, fill="both", expand=True)

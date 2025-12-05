@@ -60,7 +60,7 @@ class App(AppHelpersMixin, PointingHandlerMixin, EventHandlersMixin, AppUIMixin)
         self.pan_min=IntVar(value=-180); self.pan_max=IntVar(value=180); self.pan_step=IntVar(value=15)
         self.tilt_min=IntVar(value=-30); self.tilt_max=IntVar(value=90);  self.tilt_step=IntVar(value=15)
         self.width=IntVar(value=2592);   self.height=IntVar(value=1944); self.quality=IntVar(value=90)
-        self.speed=IntVar(value=0);    self.acc=DoubleVar(value=0.0);  self.settle=DoubleVar(value=0.05)
+        self.speed=IntVar(value=0);    self.acc=DoubleVar(value=0.0);  self.settle=DoubleVar(value=0.1)
         self.led_settle=DoubleVar(value=0.4)
 
         # Pointing variables
@@ -75,9 +75,9 @@ class App(AppHelpersMixin, PointingHandlerMixin, EventHandlersMixin, AppUIMixin)
         self.pointing_px_tol = IntVar(value=7)
         self.pointing_min_frames = IntVar(value=4)
         self.pointing_max_step = DoubleVar(value=5.0)
-        self.pointing_cooldown = IntVar(value=250)
+        self.point_settle = DoubleVar(value=0.3)
         self.pointing_enable = BooleanVar(value=False)
-        self.pointing_interval = DoubleVar(value=3.0)
+        self.pointing_interval = DoubleVar(value=0.1)
 
         # Manual/Preview variables
         self.mv_pan=DoubleVar(value=0.0); self.mv_tilt=DoubleVar(value=0.0)
@@ -134,6 +134,8 @@ class App(AppHelpersMixin, PointingHandlerMixin, EventHandlersMixin, AppUIMixin)
         if pathlib.Path(self.yolo_wpath.get()).exists(): self._get_yolo_model()
 
         self.root.after(POLL_INTERVAL_MS, self._poll)
+        # [추가] 0.5초 뒤에 강제로 프리뷰 시작 명령 보내기 (이게 해결책!)
+        self.root.after(500, self.resume_preview)  # <--- 이 줄을 추가하세요!
 
     # ... (run, load_npz 등 메서드들은 그대로 유지하되 UI 생성 코드만 없으면 됨)
     def run(self): self.root.mainloop()
