@@ -9,6 +9,17 @@ import tkinter as tk
 from gui_parts import ScrollFrame
 import pathlib
 
+# Optional matplotlib for PV monitoring
+try:
+    import matplotlib
+    matplotlib.use('TkAgg')
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    from matplotlib.figure import Figure
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
+    print("[WARNING] matplotlib not installed. PV Monitor tab will be disabled.")
+
 class AppUIMixin:
     """GUI layout and widget initialization"""
     
@@ -18,6 +29,7 @@ class AppUIMixin:
         self._setup_manual_tab()
         self._setup_misc_tab()
         self._setup_pointing_tab()
+        self._setup_pv_tab()
     
     def _setup_scan_tab(self):
         for i in range(self.notebook.index("end")):
@@ -175,3 +187,106 @@ class AppUIMixin:
         Label(debug_frame, text="Debug Target Preview", bg="#111", fg="white", font=("", 10, "bold")).pack(pady=5)
         self.debug_preview_label = Label(debug_frame, bg="#111", fg="#666", text="(Waiting for detection...)")
         self.debug_preview_label.pack(fill="both", expand=True, padx=10, pady=10)
+    
+    def _setup_pv_tab(self):
+        """PV Monitor Tab Layout"""
+        # Find or create PV tab
+        pv_tab = None
+        for i in range(self.notebook.index("end")):
+            if self.notebook.tab(i, "text") == "PV Monitor":
+                pv_tab = self.notebook.nametowidget(self.notebook.tabs()[i])
+                break
+        
+        if pv_tab is None:
+            # Tab doesn't exist, will be created in test.py
+            return
+        
+        # Clear existing widgets
+        for widget in pv_tab.winfo_children():
+            widget.destroy()
+        
+        # Check if matplotlib is available
+        if not MATPLOTLIB_AVAILABLE:
+            error_frame = Frame(pv_tab)
+            error_frame.pack(fill="both", expand=True, padx=20, pady=20)
+            Label(error_frame, text="⚠️ PV Monitor 사용 불가", font=("", 14, "bold"), fg="red").pack(pady=10)
+            Label(error_frame, text="matplotlib이 설치되지 않았습니다.", font=("", 11)).pack(pady=5)
+            Label(error_frame, text="설치 명령어:", font=("", 10, "bold")).pack(pady=10)
+            Label(error_frame, text="pip install matplotlib", font=("Consolas", 10), bg="#f0f0f0").pack(pady=5)
+            return
+        
+        # Main container
+        main_frame = Frame(pv_tab)
+        main_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Left panel - Controls
+        left_panel = Frame(main_frame, relief="ridge", borderwidth=2)
+        left_panel.pack(side="left", fill="y", padx=(0, 10))
+        
+        # Title
+        Label(left_panel, text="PV Monitor Control", font=("", 12, "bold")).pack(pady=10)
+        
+        # Port selection
+        port_frame = Frame(left_panel)
+        port_frame.pack(pady=5, padx=10, fill="x")
+        Label(port_frame, text="Port:").pack(side="left")
+        ttk.Entry(port_frame, textvariable=self.pv_port, width=10).pack(side="left", padx=5)
+        
+        # Start/Stop buttons
+        btn_frame = Frame(left_panel)
+        btn_frame.pack(pady=10, padx=10)
+        self.pv_start_btn = Button(btn_frame, text="▶ Start", command=self.start_pv_monitoring, 
+                                    bg="#4CAF50", fg="white", width=12)
+        self.pv_start_btn.pack(pady=5)
+        self.pv_stop_btn = Button(btn_frame, text="■ Stop", command=self.stop_pv_monitoring,
+                                   bg="#f44336", fg="white", width=12, state="disabled")
+        self.pv_stop_btn.pack(pady=5)
+        
+        # Clear button
+        Button(left_panel, text="Clear Graph", command=self.clear_pv_graph, width=12).pack(pady=5)
+        
+        # Status
+        ttk.Separator(left_panel, orient="horizontal").pack(fill="x", pady=10)
+        Label(left_panel, text="Current Values", font=("", 10, "bold")).pack(pady=5)
+        
+        self.pv_voltage_label = Label(left_panel, text="Voltage: -- V", font=("", 10))
+        self.pv_voltage_label.pack(anchor="w", padx=10, pady=2)
+        
+        self.pv_current_label = Label(left_panel, text="Current: -- mA", font=("", 10))
+        self.pv_current_label.pack(anchor="w", padx=10, pady=2)
+        
+        self.pv_power_label = Label(left_panel, text="Power: -- mW", font=("", 10))
+        self.pv_power_label.pack(anchor="w", padx=10, pady=2)
+        
+        # Status message
+        ttk.Separator(left_panel, orient="horizontal").pack(fill="x", pady=10)
+        self.pv_status_label = Label(left_panel, text="Status: Ready", fg="gray", wraplength=150)
+        self.pv_status_label.pack(anchor="w", padx=10, pady=5)
+        
+        # Right panel - Graph
+        graph_panel = Frame(main_frame, relief="ridge", borderwidth=2)
+        graph_panel.pack(side="right", fill="both", expand=True)
+        
+        # Create matplotlib figure
+        self.pv_figure = Figure(figsize=(8, 6), dpi=80)
+        
+        # Create 3 subplots
+        self.pv_ax_voltage = self.pv_figure.add_subplot(311)
+        self.pv_ax_voltage.set_ylabel('Voltage (V)', fontsize=9)
+        self.pv_ax_voltage.grid(True, alpha=0.3)
+        
+        self.pv_ax_current = self.pv_figure.add_subplot(312)
+        self.pv_ax_current.set_ylabel('Current (mA)', fontsize=9)
+        self.pv_ax_current.grid(True, alpha=0.3)
+        
+        self.pv_ax_power = self.pv_figure.add_subplot(313)
+        self.pv_ax_power.set_xlabel('Time (s)', fontsize=9)
+        self.pv_ax_power.set_ylabel('Power (mW)', fontsize=9)
+        self.pv_ax_power.grid(True, alpha=0.3)
+        
+        self.pv_figure.tight_layout()
+        
+        # Embed figure in tkinter
+        self.pv_canvas = FigureCanvasTkAgg(self.pv_figure, master=graph_panel)
+        self.pv_canvas.draw()
+        self.pv_canvas.get_tk_widget().pack(fill="both", expand=True)

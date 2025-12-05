@@ -258,6 +258,10 @@ class PointingHandlerMixin:
             except Exception as e:
                 self._pointing_logging = False
                 ui_q.put(("toast", f"[Point] 로그 시작 실패: {e}"))
+            
+            # ==== PV 모니터링 자동 시작 ====
+            if hasattr(self, 'pv_monitor') and not self.pv_monitoring.get():
+                self.start_pv_monitoring()
         else:
             self.laser_on.set(False)
             # CSV 종료
@@ -270,6 +274,10 @@ class PointingHandlerMixin:
                     ui_q.put(("toast", "📄 Pointing log 종료"))
                 except Exception as e:
                     ui_q.put(("toast", f"❌ log 종료 실패: {e}"))
+            
+            # ==== PV 모니터링 자동 중지 ====
+            if hasattr(self, 'pv_monitor') and self.pv_monitoring.get():
+                self.stop_pv_monitoring()
 
     def pointing_choose_csv(self):
         path = filedialog.askopenfilename(filetypes=[("CSV","*.csv")])

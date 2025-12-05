@@ -21,6 +21,10 @@ class EventHandlersMixin:
         """Main event loop - check triggers and process events"""
         self._check_pointing_trigger()
         
+        # Update PV graph if monitoring is active
+        if hasattr(self, 'pv_monitoring') and self.pv_monitoring.get():
+            self.update_pv_graph()
+        
         try:
             while True:
                 tag, payload = ui_q.get_nowait()

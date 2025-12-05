@@ -20,6 +20,7 @@ from app_helpers import AppHelpersMixin
 from pointing_handler import PointingHandlerMixin
 from event_handlers import EventHandlersMixin
 from app_ui import AppUIMixin
+from pv_vi import PVMonitor
 
 SERVER_HOST = "127.0.0.1"
 GUI_CTRL_PORT = 7600
@@ -75,6 +76,7 @@ class App(AppHelpersMixin, PointingHandlerMixin, EventHandlersMixin, AppUIMixin)
         self.pointing_px_tol = IntVar(value=7)
         self.pointing_min_frames = IntVar(value=4)
         self.pointing_max_step = DoubleVar(value=5.0)
+        self.point_settle = DoubleVar(value=0.3)
         self.pointing_enable = BooleanVar(value=False)
         self.pointing_interval = DoubleVar(value=0.1)
 
@@ -97,6 +99,11 @@ class App(AppHelpersMixin, PointingHandlerMixin, EventHandlersMixin, AppUIMixin)
         self._pointing_stable_cnt = 0
         self._curr_pan = 0.0; self._curr_tilt = 0.0
         self._fits_h = {}; self._fits_v = {}
+        
+        # PV Monitor variables
+        self.pv_port = StringVar(value="COM8")
+        self.pv_monitoring = BooleanVar(value=False)
+        self.pv_monitor = PVMonitor(max_history=100)
 
         # ==== UI Layout (뼈대만 생성) ====
         # 1. Top Bar
@@ -123,6 +130,7 @@ class App(AppHelpersMixin, PointingHandlerMixin, EventHandlersMixin, AppUIMixin)
         self.notebook.add(Frame(self.notebook), text="Manual / LED")
         self.notebook.add(Frame(self.notebook), text="Preview & Settings")
         self.notebook.add(Frame(self.notebook), text="Pointing")
+        self.notebook.add(Frame(self.notebook), text="PV Monitor")
 
         # ==== UI Setup 호출 (여기가 진짜!) ====
         # app_ui.py의 setup_ui()가 위에서 만든 변수들을 가지고 화면을 채웁니다.
@@ -218,6 +226,87 @@ class App(AppHelpersMixin, PointingHandlerMixin, EventHandlersMixin, AppUIMixin)
             self._resume_preview_after_snap = True
         fname = datetime.now().strftime("snap_%Y%m%d_%H%M%S.jpg")
         self._send_snap_cmd(fname)
+    
+    # PV Monitoring Methods
+    def start_pv_monitoring(self):
+        """Start PV monitoring"""
+        port = self.pv_port.get()
+        if self.pv_monitor.start_monitoring(port):
+            self.pv_monitoring.set(True)
+            # Update UI only if elements exist (matplotlib available)
+            if hasattr(self, 'pv_start_btn'):
+                self.pv_start_btn.config(state="disabled")
+            if hasattr(self, 'pv_stop_btn'):
+                self.pv_stop_btn.config(state="normal")
+            if hasattr(self, 'pv_status_label'):
+                self.pv_status_label.config(text=f"Status: Monitoring on {port}", fg="green")
+            ui_q.put(("toast", f"✅ PV 모니터링 시작: {port}"))
+        else:
+            error = self.pv_monitor.get_last_error()
+            if hasattr(self, 'pv_status_label'):
+                self.pv_status_label.config(text=f"Error: {error}", fg="red")
+            ui_q.put(("toast", f"❌ 시작 실패: {error}"))
+    
+    def stop_pv_monitoring(self):
+        """Stop PV monitoring"""
+        self.pv_monitor.stop_monitoring()
+        self.pv_monitoring.set(False)
+        # Update UI only if elements exist (matplotlib available)
+        if hasattr(self, 'pv_start_btn'):
+            self.pv_start_btn.config(state="normal")
+        if hasattr(self, 'pv_stop_btn'):
+            self.pv_stop_btn.config(state="disabled")
+        if hasattr(self, 'pv_status_label'):
+            self.pv_status_label.config(text="Status: Stopped", fg="gray")
+        ui_q.put(("toast", "⏹️ PV 모니터링 중지"))
+    
+    def clear_pv_graph(self):
+        """Clear PV graph history"""
+        self.pv_monitor.clear_history()
+        self.update_pv_graph()
+        ui_q.put(("toast", "📊 그래프 초기화"))
+    
+    def update_pv_graph(self):
+        """Update PV monitoring graph"""
+        if not hasattr(self, 'pv_ax_voltage'):
+            return  # UI not ready yet
+        
+        # Get latest data
+        voltage, current, power = self.pv_monitor.get_latest_data()
+        
+        # Update labels (only if they exist)
+        if hasattr(self, 'pv_voltage_label'):
+            self.pv_voltage_label.config(text=f"Voltage: {voltage:.2f} V")
+        if hasattr(self, 'pv_current_label'):
+            self.pv_current_label.config(text=f"Current: {current:.2f} mA")
+        if hasattr(self, 'pv_power_label'):
+            self.pv_power_label.config(text=f"Power: {power:.2f} mW")
+        
+        # Get history
+        time_data, voltage_data, current_data, power_data = self.pv_monitor.get_data_history()
+        
+        if len(time_data) == 0:
+            return  # No data yet
+        
+        # Clear and redraw plots
+        self.pv_ax_voltage.clear()
+        self.pv_ax_voltage.plot(time_data, voltage_data, 'b-', linewidth=1.5)
+        self.pv_ax_voltage.set_ylabel('Voltage (V)', fontsize=9)
+        self.pv_ax_voltage.grid(True, alpha=0.3)
+        
+        self.pv_ax_current.clear()
+        self.pv_ax_current.plot(time_data, current_data, 'r-', linewidth=1.5)
+        self.pv_ax_current.set_ylabel('Current (mA)', fontsize=9)
+        self.pv_ax_current.grid(True, alpha=0.3)
+        
+        self.pv_ax_power.clear()
+        self.pv_ax_power.plot(time_data, power_data, 'g-', linewidth=1.5)
+        self.pv_ax_power.set_xlabel('Time (s)', fontsize=9)
+        self.pv_ax_power.set_ylabel('Power (mW)', fontsize=9)
+        self.pv_ax_power.grid(True, alpha=0.3)
+        
+        self.pv_figure.tight_layout()
+        self.pv_canvas.draw()
 
 def main():
     root = Tk()
