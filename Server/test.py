@@ -182,12 +182,19 @@ class GuiControlHandler(socketserver.BaseRequestHandler):
 class GuiImageHandler(socketserver.BaseRequestHandler):
     def handle(self):
         sock = self.request
+        sock.settimeout(2.0)  # Prevent blocking sendall from hanging the server
         with gui_img_lock:
             gui_img_clients.add(sock)
         try:
             while True:
-                if not sock.recv(1):
-                    break
+                try:
+                    if not sock.recv(1):
+                        break
+                except socket.timeout:
+                    # Timeout on recv is expected since client doesn't send data.
+                    # This allows the loop to continue and keeps the socket alive
+                    # while enforcing timeout on send() operations elsewhere.
+                    continue
         except Exception:
             pass
         finally:

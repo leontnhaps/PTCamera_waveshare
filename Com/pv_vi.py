@@ -38,6 +38,9 @@ class PVMonitor:
         self._power_history = deque(maxlen=max_history)
         self._time_history = deque(maxlen=max_history)
         
+        # Recording control
+        self._recording = False
+        
         # Latest values
         self._latest_voltage: float = 0.0
         self._latest_current: float = 0.0
@@ -73,6 +76,7 @@ class PVMonitor:
             
             # Start reading thread
             self._running = True
+            self._recording = False  # Default to not recording
             self._thread = threading.Thread(target=self._read_loop, daemon=True)
             self._thread.start()
             
@@ -125,14 +129,17 @@ class PVMonitor:
                             # Store data (thread-safe)
                             elapsed_time = time.time() - start_time
                             with self._lock:
-                                self._voltage_history.append(voltage)
-                                self._current_history.append(current)
-                                self._power_history.append(power)
-                                self._time_history.append(elapsed_time)
-                                
+                                # Update latest always
                                 self._latest_voltage = voltage
                                 self._latest_current = current
                                 self._latest_power = power
+
+                                # Append to history ONLY if recording is active
+                                if self._recording:
+                                    self._voltage_history.append(voltage)
+                                    self._current_history.append(current)
+                                    self._power_history.append(power)
+                                    self._time_history.append(elapsed_time)
                                 
                         except ValueError:
                             # Invalid number format, skip
@@ -146,6 +153,11 @@ class PVMonitor:
                     self._set_error(f"읽기 오류: {str(e)}")
                     time.sleep(0.5)  # Wait before retry
     
+    def set_recording(self, enable: bool):
+        """Set execution state of recording history"""
+        with self._lock:
+            self._recording = enable
+
     def get_latest_data(self) -> Tuple[float, float, float]:
         """
         Get the latest voltage, current, power values

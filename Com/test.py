@@ -142,7 +142,41 @@ class App(AppHelpersMixin, PointingHandlerMixin, EventHandlersMixin, AppUIMixin)
 
         self.root.after(POLL_INTERVAL_MS, self._poll)
         # [추가] 0.5초 뒤에 강제로 프리뷰 시작 명령 보내기 (이게 해결책!)
-        self.root.after(500, self.resume_preview)  # <--- 이 줄을 추가하세요!
+        self.root.after(500, self.resume_preview)
+
+    def _poll(self):
+        """
+        [Override] Main event loop with throttling to prevent UI freeze
+        """
+        self._check_pointing_trigger()
+        
+        # Update PV status
+        if hasattr(self, 'pv_monitoring') and self.pv_monitoring.get():
+            self._check_pv_status()
+        
+        # Limit processing to 20 events per cycle to keep UI responsive
+        for _ in range(20):
+            try:
+                tag, payload = ui_q.get_nowait()
+                
+                if tag == "evt":
+                    self._handle_server_event(payload)
+                elif tag == "preview":
+                    self._set_preview(payload)
+                elif tag == "saved":
+                    self._handle_saved_image(payload)
+                elif tag == "toast":
+                    print(f"[TOAST] {payload}")
+                elif tag == "pointing_step_2":
+                    self._handle_pointing_step2()
+                elif tag == "preview_on":
+                    self._handle_preview_on()
+                elif tag == "debug_preview":
+                    self._update_debug_preview(payload)
+            except queue.Empty:
+                break
+        
+        self.root.after(POLL_INTERVAL_MS, self._poll)
 
     # ... (run, load_npz 등 메서드들은 그대로 유지하되 UI 생성 코드만 없으면 됨)
     def run(self): self.root.mainloop()
@@ -158,6 +192,11 @@ class App(AppHelpersMixin, PointingHandlerMixin, EventHandlersMixin, AppUIMixin)
         return self.image_processor.undistort(bgr, use_torch=True)
 
     def resume_preview(self):
+        if not self.ctrl.sock:
+            print("[App] Control not connected yet, retrying resume_preview in 500ms...")
+            self.root.after(500, self.resume_preview)
+            return
+
         if self.preview_enable.get():
             self.ctrl.send({"cmd":"preview", "enable": True, "width": self.preview_w.get(), "height": self.preview_h.get(), "fps": self.preview_fps.get(), "quality":self.preview_q.get()})
 

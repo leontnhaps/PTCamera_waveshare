@@ -21,9 +21,9 @@ class EventHandlersMixin:
         """Main event loop - check triggers and process events"""
         self._check_pointing_trigger()
         
-        # Update PV graph if monitoring is active
+        # Update PV status (check laser & throttle UI)
         if hasattr(self, 'pv_monitoring') and self.pv_monitoring.get():
-            self.update_pv_graph()
+            self._check_pv_status()
         
         try:
             while True:
@@ -62,6 +62,38 @@ class EventHandlersMixin:
             return
         
         self._start_pointing_cycle()
+    
+
+
+    def _check_pv_status(self):
+        """
+        Check laser status to control PV recording and throttle UI updates
+        """
+        # 1. Check Laser State
+        # Manual laser toggle OR Pointing logic where laser is firing
+        # Pointing states: 1(None->LaserOn), 2(LaserOn->LaserOff) -> roughly implies laser is active or about to be
+        # However, purely checking self.laser_on.get() handles the manual case.
+        # For Pointing, the script toggles 'laser' cmd. It might NOT update self.laser_on boolean var if driven by script commands directly?
+        # Actually EventHandlers updates self.ctrl.send, but doesn't necessarily update a local BooleanVar for pointing steps.
+        # Let's rely on self.laser_on.get() for manual, and infer pointing.
+        
+        is_manual_laser = self.laser_on.get()
+        # State 1 = WAIT_LASER_ON (Laser is ON).
+        # State 2 = WAIT_LASER_OFF (Laser is OFF, waiting for captured image).
+        # So we should ONLY record during State 1.
+        is_pointing_laser = (self._pointing_state == 1)
+        
+        is_laser_active = is_manual_laser or is_pointing_laser
+        self.pv_monitor.set_recording(is_laser_active)
+        
+        # 2. Throttle UI Updates (Graph)
+        if not hasattr(self, '_last_pv_update'):
+            self._last_pv_update = 0
+            
+        now = time.time()
+        if (now - self._last_pv_update) > 0.5:  # Update every 500ms
+            self.update_pv_graph()
+            self._last_pv_update = now
     
     # ========== Server Event Handlers ==========
     
