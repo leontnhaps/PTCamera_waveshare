@@ -376,16 +376,6 @@ class App(AppHelpersMixin, PointingHandlerMixin, EventHandlersMixin, AppUIMixin)
 
         # [RESTORED] Move to Target Button
         ttk.Button(point_csv_frame, text="Move to Target", command=self.pointing_move).pack(anchor="w", padx=5, pady=5)
-        
-        # Debug Preview Label (on right side of tab)
-        debug_frame = Frame(self.tab_point, bg="#111", width=420, height=420, relief="solid", borderwidth=2)
-        debug_frame.pack(side="right", padx=10, pady=10)
-        debug_frame.pack_propagate(False)
-        
-        Label(debug_frame, text="Debug Target Preview", bg="#111", fg="white", font=("", 10, "bold")).pack(pady=5)
-        self.debug_preview_label = Label(debug_frame, bg="#111", fg="#666", text="(Waiting for detection...)")
-        self.debug_preview_label.pack(fill="both", expand=True, padx=10, pady=10)
-        self.debug_preview_img = None
      
 
 
