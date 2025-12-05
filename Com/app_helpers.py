@@ -25,7 +25,8 @@ class AppHelpersMixin:
             "height": self.height.get(),
             "quality": self.quality.get(),
             "save": save_name,
-            "hard_stop": hard_stop
+            "hard_stop": hard_stop,
+            "ud_save": self.ud_save_copy.get()
         })
 
     def _get_yolo_model(self):

@@ -167,7 +167,8 @@ class EventHandlersMixin:
         wait_ms = int(self.led_settle.get() * 1000)
         self.root.after(wait_ms, lambda: self.ctrl.send({
             "cmd": "snap", "width": self.width.get(), "height": self.height.get(),
-            "quality": self.quality.get(), "save": "pointing_laser_off.jpg", "hard_stop": False
+            "quality": self.quality.get(), "save": "pointing_laser_off.jpg", "hard_stop": False,
+            "ud_save": self.ud_save_copy.get()
         }))
     
     def _handle_pointing_laser_off(self, data):
@@ -193,7 +194,8 @@ class EventHandlersMixin:
         wait_ms = int(self.led_settle.get() * 1000)
         self.root.after(wait_ms, lambda: self.ctrl.send({
             "cmd": "snap", "width": self.width.get(), "height": self.height.get(),
-            "quality": self.quality.get(), "save": "pointing_led_on.jpg", "hard_stop": False
+            "quality": self.quality.get(), "save": "pointing_led_on.jpg", "hard_stop": False,
+            "ud_save": self.ud_save_copy.get()
         }))
     
     def _handle_pointing_led_on(self, data):
@@ -208,7 +210,8 @@ class EventHandlersMixin:
         wait_ms = int(self.led_settle.get() * 1000)
         self.root.after(wait_ms, lambda: self.ctrl.send({
             "cmd": "snap", "width": self.width.get(), "height": self.height.get(),
-            "quality": self.quality.get(), "save": "pointing_led_off.jpg", "hard_stop": False
+            "quality": self.quality.get(), "save": "pointing_led_off.jpg", "hard_stop": False,
+            "ud_save": self.ud_save_copy.get()
         }))
     
     def _handle_pointing_led_off(self, data):
@@ -229,11 +232,42 @@ class EventHandlersMixin:
         self.resume_preview()
     
     def _handle_generic_saved_image(self, name, data):
-        """Handle generic saved image - update preview"""
+        """Handle generic saved image - update preview and optionally save undistorted copy"""
         # Update preview with received image
         self._set_preview(data)
         
+        # [NEW] Save undistorted copy if enabled
+        if self.ud_save_copy.get() and self.image_processor.has_calibration():
+            try:
+                # Decode image
+                img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+                if img is not None:
+                    # Undistort
+                    img_ud = self._undistort_bgr(img)
+                    
+                    # Generate .ud filename
+                    import pathlib
+                    from datetime import datetime
+                    outdir = pathlib.Path(self.outdir.get())
+                    outdir.mkdir(parents=True, exist_ok=True)
+                    
+                    # Replace extension with .ud.jpg
+                    base_name = pathlib.Path(name).stem
+                    ud_name = f"{base_name}.ud.jpg"
+                    ud_path = outdir / ud_name
+                    
+                    # Save undistorted image
+                    cv2.imwrite(str(ud_path), img_ud, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                    print(f"[SAVED UD] {ud_name}")
+            except Exception as e:
+                print(f"[ERROR] Failed to save undistorted copy: {e}")
+        
         print(f"[SAVED] {name}")
+        
+        # [NEW] Resume preview after snap if it was enabled
+        if self._resume_preview_after_snap:
+            self._resume_preview_after_snap = False
+            self.root.after(200, self.resume_preview)
     
     # ========== Preview Handlers ==========
     
