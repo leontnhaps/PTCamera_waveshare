@@ -921,7 +921,7 @@ class App:
         self._fits_v = {}
         
         # Pointing mode settings
-        self.pointing_px_tol = IntVar(value=7)
+        self.pointing_px_tol = IntVar(value=10)
         self.pointing_min_frames = IntVar(value=4)
         self.pointing_max_step = DoubleVar(value=5.0)
         self.pointing_cooldown = IntVar(value=250)
@@ -1332,10 +1332,15 @@ class App:
         if M["m00"] == 0:
             return None
         
-        cx = int(M["m10"] / M["m00"])
-        cy = int(M["m01"] / M["m00"])
+        # ROI 내부 좌표
+        roi_cx = int(M["m10"] / M["m00"])
+        roi_cy = int(M["m01"] / M["m00"])
         
-        return (cx, cy)
+        # 전체 이미지 좌표로 변환 (중요!)
+        global_cx = roi_cx + x1
+        global_cy = roi_cy + y1
+        
+        return (global_cx, global_cy)
 
     # ==== Pointing Mode Logic ====
     def _start_pointing_cycle(self):
@@ -1421,29 +1426,6 @@ class App:
             target_y_offset = 5.0 * px_per_cm
             target_px = (obj_cx, obj_cy + target_y_offset)
             
-            # Error (Target - Laser)
-            # We want to move Camera so that Laser hits Target.
-            # Actually, Laser is fixed to Camera.
-            # So we want to move Camera so that Laser point (fixed in frame) overlaps with Target point (in frame).
-            # Wait, if we move Camera, the Scene moves.
-            # If we want Laser (fixed px) to be at Target (scene px), we need to move Camera.
-            # If Target is at (100, 100) and Laser is at (200, 200).
-            # We need to move Camera so that Target moves to (200, 200).
-            # To move Scene Point (100,100) to (200,200) (Right, Down), we need to Pan Left, Tilt Up?
-            # Let's check coordinate system.
-            # Pan + -> Camera Right -> Image Left.
-            # Tilt + -> Camera Up -> Image Down.
-            # We want Image Point to move from (100,100) to (200,200). (+100, +100).
-            # So we need Pan Left (Pan -) and Tilt Up (Tilt +)?
-            # Error = Target - Laser = (100-200, 100-200) = (-100, -100).
-            # If we use Error directly:
-            # d_pan = -100 * k. (Pan -). Correct.
-            # d_tilt = -100 * k. (Tilt -). Wait.
-            # If Tilt - -> Camera Down -> Image Up.
-            # We want Image Down. So we need Tilt +.
-            # So d_tilt should be positive.
-            # So d_tilt = -Error_y * k?
-            # Error_y = -100. -(-100) = +100. Correct.
             
             err_x = target_px[0] - self._laser_px[0]
             err_y = target_px[1] - self._laser_px[1]
@@ -1928,41 +1910,6 @@ class App:
         d = np.abs(sel_k - q) + 1e-6
         w = 1.0 / d
         return float(np.sum(sel_v * w) / np.sum(w))
-
-    def _align_laser_to_film(self, lx: float, ly: float, tx: float, ty: float, W: int, H: int):
-        """
-        레이저 (lx, ly)를 타깃 (tx, ty) = '필름 중심'으로 정렬.
-        px 오차 → a,e로 각도 환산 → 쿨다운/클램프 → 이동
-        """
-
-        ex = float(tx) - float(lx)
-        ey = float(ty) - float(ly)
-
-        # 쿨다운
-        now_ms = int(time.time() * 1000)
-        if now_ms - self._pointing_last_ms < int(self.centering_cooldown.get()):
-            return
-
-        # px/deg 추정
-        a = self._interp_fit(getattr(self, "_fits_h", {}), self._curr_tilt, "a", k=2)
-        e = self._interp_fit(getattr(self, "_fits_v", {}), self._curr_pan,  "e", k=2)
-        if not np.isfinite(a) or abs(a) < 1e-6 or not np.isfinite(e) or abs(e) < 1e-6:
-            return
-
-        dpan  = float(np.clip(ex / a, -float(self.pointing_max_step.get()), float(self.pointing_max_step.get())))
-        dtilt = float(np.clip(ey / e, -float(self.pointing_max_step.get()), float(self.pointing_max_step.get())))
-
-        self._curr_pan  = float(self._curr_pan  + dpan)
-        self._curr_tilt = float(self._curr_tilt + dtilt)
-
-        self.ctrl.send({
-            "cmd":"move",
-            "pan":  self._curr_pan,
-            "tilt": self._curr_tilt,
-            "speed": int(self.point_speed.get()),
-            "acc":   float(self.point_acc.get())
-        })
-        self._pointing_last_ms = now_ms
 
 def main():
     root = Tk()

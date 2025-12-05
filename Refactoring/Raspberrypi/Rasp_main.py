@@ -105,13 +105,8 @@ def irange(a,b,s):
 
 def push_image(sock: socket.socket, name: str, data: bytes):
     """GUI 이미지 채널 프로토콜로 이미지 전송"""
-    try:
-        header = struct.pack("<H", len(name.encode())) + name.encode() + struct.pack("<I", len(data))
-        sock.sendall(header); sock.sendall(data)
-    except BrokenPipeError:
-        print(f"[Network] BrokenPipe during push_image: {name}")
-    except Exception as e:
-        print(f"[Network] Error during push_image: {e}")
+    header = struct.pack("<H", len(name.encode())) + name.encode() + struct.pack("<I", len(data))
+    sock.sendall(header); sock.sendall(data)
 
 # ===================== 프리뷰 스레드 =====================
 preview_thread = None
