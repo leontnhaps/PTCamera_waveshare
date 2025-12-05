@@ -4,222 +4,175 @@ GUI layout and initialization
 Separates UI setup from business logic
 """
 
-from tkinter import Tk, Label, Button, Frame, Checkbutton, ttk, StringVar, IntVar, DoubleVar, BooleanVar
+from tkinter import Tk, Label, Button, Frame, Checkbutton, ttk, StringVar, IntVar, DoubleVar, BooleanVar, Scale, HORIZONTAL
+import tkinter as tk
 from gui_parts import ScrollFrame
 import pathlib
-
 
 class AppUIMixin:
     """GUI layout and widget initialization"""
     
     def setup_ui(self):
         """Initialize all UI components"""
-        # Notebook (tabs)
-        self.notebook = ttk.Notebook(self.root)
-        self.notebook.pack(fill="both", expand=True, padx=4, pady=4)
-        
-        # Create tabs
         self._setup_scan_tab()
         self._setup_manual_tab()
         self._setup_misc_tab()
         self._setup_pointing_tab()
-        
-        # Preview box (common)
-        self._setup_preview_box()
-    
-    # ========== Scan Tab ==========
     
     def _setup_scan_tab(self):
-        """Setup scan tab layout"""
-        tab_scan = Frame(self.notebook)
-        self.notebook.add(tab_scan, text="Scan")
+        for i in range(self.notebook.index("end")):
+            if self.notebook.tab(i, "text") == "Scan":
+                tab_scan = self.notebook.nametowidget(self.notebook.tabs()[i])
+                break
         
-        # ScrollFrame for scan controls
-        sf = ScrollFrame(tab_scan)
-        sf.pack(fill="both", expand=True)
-        f = sf.body
+        for widget in tab_scan.winfo_children(): widget.destroy()
         
         r = 0
-        Label(f, text="=== Pan/Tilt Range ===", font=("",10,"bold")).grid(row=r, column=0, columnspan=4, sticky="w", padx=4, pady=4)
-        r += 1
-        self._row(f, r, "Pan (deg)", self.scan_pan_min, self.scan_pan_max, self.scan_pan_step); r += 1
-        self._row(f, r, "Tilt (deg)", self.scan_tilt_min, self.scan_tilt_max, self.scan_tilt_step); r += 1
+        self._row(tab_scan, r, "Pan min/max/step", self.pan_min, self.pan_max, self.pan_step); r += 1
+        self._row(tab_scan, r, "Tilt min/max/step", self.tilt_min, self.tilt_max, self.tilt_step); r += 1
+        self._row(tab_scan, r, "Resolution (w×h)", self.width, self.height, None, ("W","H","")); r += 1
+        self._entry(tab_scan, r, "Quality(%)", self.quality); r += 1
+        self._entry(tab_scan, r, "Speed", self.speed); r += 1
+        self._entry(tab_scan, r, "Accel", self.acc); r += 1
+        self._entry(tab_scan, r, "Settle(s)", self.settle); r += 1
+        self._entry(tab_scan, r, "LED Settle(s)", self.led_settle); r += 1
+        Checkbutton(tab_scan, text="Hard stop(정지 펄스)", variable=self.hard_stop).grid(row=r, column=1, sticky="w", padx=4, pady=2); r += 1
         
-        r += 1
-        Label(f, text="=== Capture Settings ===", font=("",10,"bold")).grid(row=r, column=0, columnspan=4, sticky="w", padx=4, pady=4)
-        r += 1
-        self._row(f, r, "Resolution", self.width, self.height); r += 1
-        self._entry(f, r, "Quality (1-100)", self.quality); r += 1
-        self._entry(f, r, "Speed", self.speed); r += 1
-        self._entry(f, r, "Accel", self.acc); r += 1
-        self._entry(f, r, "LED Settle (s)", self.led_settle); r += 1
-        
-        r += 1
-        Label(f, text="=== YOLO Settings ===", font=("",10,"bold")).grid(row=r, column=0, columnspan=4, sticky="w", padx=4, pady=4)
-        r += 1
-        Label(f, text="Weights Path:").grid(row=r, column=0, sticky="w", padx=4, pady=2)
-        ttk.Entry(f, width=40, textvariable=self.yolo_wpath).grid(row=r, column=1, columnspan=3, sticky="ew", padx=4)
-        r += 1
-        Button(f, text="Browse YOLO Weights...", command=self.load_yolo_weights).grid(row=r, column=0, columnspan=4, sticky="ew", padx=4, pady=4)
-        r += 1
-        
-        r += 1
-        Button(f, text="START SCAN", bg="green", fg="white", font=("",12,"bold"), command=self.start_scan).grid(row=r, column=0, columnspan=4, sticky="ew", padx=4, pady=8)
-        r += 1
-        Button(f, text="STOP SCAN", bg="red", fg="white", font=("",12,"bold"), command=self.stop_scan).grid(row=r, column=0, columnspan=4, sticky="ew", padx=4, pady=8)
-        r += 1
-        
-        # Progress
-        ops = Frame(f)
-        ops.grid(row=r, column=0, columnspan=4, sticky="ew", padx=4, pady=4)
-        self.prog_lbl = Label(ops, text="0 / 0")
-        self.prog_lbl.pack(side="left")
-        self.last_lbl = Label(ops, text="Last: -")
-        self.last_lbl.pack(side="left", padx=10)
-    
-    # ========== Manual Tab ==========
+        ops = Frame(tab_scan); ops.grid(row=r, column=0, columnspan=4, sticky="w", pady=6)
+        Button(ops, text="Start Scan", command=self.start_scan).pack(side="left", padx=4)
+        Button(ops, text="Stop Scan", command=self.stop_scan).pack(side="left", padx=4)
+        self.prog = ttk.Progressbar(ops, orient=HORIZONTAL, length=280, mode="determinate"); self.prog.pack(side="left", padx=10)
+        self.prog_lbl = Label(ops, text="0 / 0"); self.prog_lbl.pack(side="left")
+        self.last_lbl = Label(ops, text="Last: -"); self.last_lbl.pack(side="left", padx=10)
+        self.dl_lbl = Label(ops, text="DL 0"); self.dl_lbl.pack(side="left", padx=10)
     
     def _setup_manual_tab(self):
-        """Setup manual control tab"""
-        tab_man = Frame(self.notebook)
-        self.notebook.add(tab_man, text="Manual")
+        for i in range(self.notebook.index("end")):
+            if self.notebook.tab(i, "text") == "Manual / LED":
+                tab_manual = self.notebook.nametowidget(self.notebook.tabs()[i])
+                break
         
-        sf = ScrollFrame(tab_man)
-        sf.pack(fill="both", expand=True)
-        f = sf.body
+        for widget in tab_manual.winfo_children(): widget.destroy()
         
-        r = 0
-        Label(f, text="=== Manual Controls ===", font=("",10,"bold")).grid(row=r, column=0, columnspan=4, sticky="w", padx=4, pady=4)
-        r += 1
-        
-        self._entry(f, r, "Pan (deg)", self.man_pan); r += 1
-        self._entry(f, r, "Tilt (deg)", self.man_tilt); r += 1
-        self._entry(f, r, "Speed", self.man_speed); r += 1
-        self._entry(f, r, "Accel", self.man_acc); r += 1
-        Button(f, text="MOVE", bg="blue", fg="white", command=self.apply_move).grid(row=r, column=0, columnspan=4, sticky="ew", padx=4, pady=4)
-        r += 1
-        
-        Button(f, text="CENTER (0,0)", command=self.center).grid(row=r, column=0, columnspan=4, sticky="ew", padx=4, pady=4)
-        r += 1
-        
-        r += 1
-        Label(f, text="=== LED/Laser ===", font=("",10,"bold")).grid(row=r, column=0, columnspan=4, sticky="w", padx=4, pady=4)
-        r += 1
-        self._entry(f, r, "LED Value (0-255)", self.led_val); r += 1
-        Button(f, text="SET LED", command=self.set_led).grid(row=r, column=0, columnspan=4, sticky="ew", padx=4, pady=4)
-        r += 1
-        
-        laser_frame = Frame(f)
-        laser_frame.grid(row=r, column=0, columnspan=4, sticky="ew", padx=4, pady=4)
-        Checkbutton(laser_frame, text="Laser ON", variable=self.laser_on).pack(side="left")
-        Button(laser_frame, text="Toggle Laser", command=self.toggle_laser).pack(side="left", padx=10)
-        r += 1
-        
-        r += 1
-        Label(f, text="=== Single Snap ===", font=("",10,"bold")).grid(row=r, column=0, columnspan=4, sticky="w", padx=4, pady=4)
-        r += 1
-        Button(f, text="SNAP ONE", bg="orange", command=self.snap_one).grid(row=r, column=0, columnspan=4, sticky="ew", padx=4, pady=4)
-    
-    # ========== Misc Tab ==========
+        self._slider(tab_manual, 0, "Pan", -180, 180, self.mv_pan, 0.5)
+        self._slider(tab_manual, 1, "Tilt", -30, 90, self.mv_tilt, 0.5)
+        self._slider(tab_manual, 2, "Speed", 0, 100, self.mv_speed, 1)
+        self._slider(tab_manual, 3, "Accel", 0, 1, self.mv_acc, 0.1)
+        Button(tab_manual, text="Center (0,0)", command=self.center).grid(row=4, column=0, sticky="w", pady=4)
+        Button(tab_manual, text="Apply Move", command=self.apply_move).grid(row=4, column=1, sticky="e", pady=4)
+        self._slider(tab_manual, 5, "LED", 0, 255, self.led, 1)
+        Button(tab_manual, text="Set LED", command=self.set_led).grid(row=6, column=1, sticky="e", pady=4)
+        Button(tab_manual, text="Laser ON/OFF", command=self.toggle_laser).grid(row=6, column=2, sticky="w", padx=4, pady=4)
     
     def _setup_misc_tab(self):
-        """Setup misc settings tab"""
-        tab_misc = Frame(self.notebook)
-        self.notebook.add(tab_misc, text="Misc")
+        for i in range(self.notebook.index("end")):
+            if self.notebook.tab(i, "text") == "Preview & Settings":
+                tab_misc = self.notebook.nametowidget(self.notebook.tabs()[i])
+                break
         
-        sf = ScrollFrame(tab_misc)
-        sf.pack(fill="both", expand=True)
-        f = sf.body
+        for widget in tab_misc.winfo_children(): widget.destroy()
         
-        r = 0
-        Label(f, text="=== Output Directory ===", font=("",10,"bold")).grid(row=r, column=0, columnspan=4, sticky="w", padx=4, pady=4)
-        r += 1
-        ttk.Entry(f, width=40, textvariable=self.outdir).grid(row=r, column=0, columnspan=3, sticky="ew", padx=4)
-        Button(f, text="Browse", command=self.choose_outdir).grid(row=r, column=3, padx=4)
-        r += 1
+        misc_sf = ScrollFrame(tab_misc)
+        misc_sf.pack(fill="both", expand=True)
+        misc = misc_sf.body
         
-        r += 1
-        Label(f, text="=== Calibration (Undistort) ===", font=("",10,"bold")).grid(row=r, column=0, columnspan=4, sticky="w", padx=4, pady=4)
-        r += 1
-        Button(f, text="Load calib.npz", command=lambda: self.load_npz()).grid(row=r, column=0, columnspan=4, sticky="ew", padx=4, pady=4)
-        r += 1
-        Checkbutton(f, text="Enable Undistort", variable=self.ud_enable).grid(row=r, column=0, columnspan=4, sticky="w", padx=4, pady=2)
-        r += 1
-        self._slider(f, r, "Alpha (0=crop, 1=keep all)", 0.0, 1.0, self.ud_alpha, 0.01); r += 1
+        row = 0
+        Checkbutton(misc, text="Live Preview", variable=self.preview_enable, command=self.toggle_preview).grid(row=row, column=0, sticky="w", pady=2); row += 1
+        self._row(misc, row, "Preview w/h/-", self.preview_w, self.preview_h, None, ("W","H","")); row += 1
+        self._entry(misc, row, "Preview fps", self.preview_fps); row += 1
+        self._entry(misc, row, "Preview quality", self.preview_q); row += 1
+        Button(misc, text="Apply Preview Size", command=self.apply_preview_size).grid(row=row, column=1, sticky="w", pady=4); row += 1
         
-        r += 1
-        Label(f, text="=== Preview ===", font=("",10,"bold")).grid(row=r, column=0, columnspan=4, sticky="w", padx=4, pady=4)
-        r += 1
-        Checkbutton(f, text="Enable Preview", variable=self.preview_enable, command=self.toggle_preview).grid(row=r, column=0, columnspan=4, sticky="w", padx=4, pady=2)
-        r += 1
-        self._row(f, r, "Preview Size", self.preview_w, self.preview_h); r += 1
-        self._entry(f, r, "FPS", self.preview_fps); r += 1
-        self._entry(f, r, "Quality", self.preview_q); r += 1
-        Button(f, text="Apply Preview Settings", command=self.apply_preview_size).grid(row=r, column=0, columnspan=4, sticky="ew", padx=4, pady=4)
-    
-    # ========== Pointing Tab ==========
-    
+        ttk.Separator(misc, orient="horizontal").grid(row=row, column=0, columnspan=4, sticky="ew", pady=(8,6)); row += 1
+        Checkbutton(misc, text="Undistort preview (use calib.npz)", variable=self.ud_enable).grid(row=row, column=0, sticky="w"); row += 1
+        Button(misc, text="Load calib.npz", command=self.load_npz).grid(row=row, column=0, sticky="w", pady=2)
+        Checkbutton(misc, text="Also save undistorted copy", variable=self.ud_save_copy).grid(row=row, column=1, sticky="w", pady=2); row += 1
+        Label(misc, text="Alpha/Balance (0~1)").grid(row=row, column=0, sticky="w")
+        Scale(misc, from_=0.0, to=1.0, orient=HORIZONTAL, resolution=0.01, length=200,
+              variable=self.ud_alpha, command=lambda v: setattr(self, "_ud_src_size", None)).grid(row=row, column=1, sticky="w"); row += 1
+        
+        ttk.Separator(misc, orient="horizontal").grid(row=row, column=0, columnspan=4, sticky="ew", pady=(8,6)); row += 1
+        Label(misc, text="YOLO 가중치 (.pt)").grid(row=row, column=0, sticky="w")
+        Button(misc, text="Load YOLO", command=self.load_yolo_weights).grid(row=row, column=1, sticky="w", pady=2); row += 1
+        
+        for c in range(4): misc.grid_columnconfigure(c, weight=1)
+
     def _setup_pointing_tab(self):
-        """Setup pointing mode tab"""
-        tab_point = Frame(self.notebook)
-        self.notebook.add(tab_point, text="Pointing")
+        """Pointing Tab Layout (Restored from Com_main.py)"""
+        for i in range(self.notebook.index("end")):
+            if self.notebook.tab(i, "text") == "Pointing":
+                self.tab_point = self.notebook.nametowidget(self.notebook.tabs()[i])
+                break
         
-        sf = ScrollFrame(tab_point)
-        sf.pack(fill="both", expand=True)
-        f = sf.body
+        for widget in self.tab_point.winfo_children(): widget.destroy()
+
+        # Canvas & Scrollbar
+        self.point_canvas = tk.Canvas(self.tab_point)
+        self.point_scroll = ttk.Scrollbar(self.tab_point, orient="vertical", command=self.point_canvas.yview)
+        self.point_scroll_frame = ttk.Frame(self.point_canvas)
         
-        r = 0
-        Label(f, text="=== Pointing Mode ===", font=("",10,"bold")).grid(row=r, column=0, columnspan=4, sticky="w", padx=4, pady=4)
-        r += 1
-        Checkbutton(f, text="Enable Pointing Mode", variable=self.pointing_enable, command=self.on_pointing_toggle).grid(row=r, column=0, columnspan=4, sticky="w", padx=4, pady=2)
-        r += 1
+        self.point_scroll_frame.bind("<Configure>", lambda e: self.point_canvas.configure(scrollregion=self.point_canvas.bbox("all")))
+        self.point_canvas.create_window((0, 0), window=self.point_scroll_frame, anchor="nw")
+        self.point_canvas.configure(yscrollcommand=self.point_scroll.set)
         
-        self._entry(f, r, "Interval (s)", self.pointing_interval); r += 1
-        self._entry(f, r, "Pixel Tolerance", self.pointing_px_tol); r += 1
-        self._entry(f, r, "Min Stable Frames", self.pointing_min_frames); r += 1
-        self._entry(f, r, "Max Step (deg)", self.pointing_max_step); r += 1
-        self._entry(f, r, "Cooldown (s)", self.pointing_cooldown); r += 1
-        self._entry(f, r, "ROI Size (px)", self.pointing_roi_size); r += 1
+        # Mouse Wheel
+        def _on_mousewheel(event): self.point_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        def _bind_mousewheel(event): self.point_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        def _unbind_mousewheel(event): self.point_canvas.unbind_all("<MouseWheel>")
+        self.point_canvas.bind("<Enter>", _bind_mousewheel); self.point_canvas.bind("<Leave>", _unbind_mousewheel)
+        self.point_scroll_frame.bind("<Enter>", _bind_mousewheel); self.point_scroll_frame.bind("<Leave>", _unbind_mousewheel)
         
-        r += 1
-        Label(f, text="=== CSV Analysis ===", font=("",10,"bold")).grid(row=r, column=0, columnspan=4, sticky="w", padx=4, pady=4)
-        r += 1
-        ttk.Entry(f, width=40, textvariable=self.point_csv_path).grid(row=r, column=0, columnspan=3, sticky="ew", padx=4)
-        Button(f, text="Browse", command=self.pointing_choose_csv).grid(row=r, column=3, padx=4)
-        r += 1
+        self.point_canvas.pack(side="left", fill="both", expand=True)
+        self.point_scroll.pack(side="right", fill="y")
         
-        self._entry(f, r, "Conf Min", self.point_conf_min); r += 1
-        self._entry(f, r, "Min Samples", self.point_min_samples); r += 1
-        Button(f, text="Compute Target", command=self.pointing_compute).grid(row=r, column=0, columnspan=4, sticky="ew", padx=4, pady=4)
-        r += 1
+        # Grid Layout
+        col1_frame = ttk.Frame(self.point_scroll_frame); col1_frame.grid(row=0, column=0, padx=5, pady=10, sticky="nsew")
+        col2_frame = ttk.Frame(self.point_scroll_frame); col2_frame.grid(row=0, column=1, padx=5, pady=10, sticky="nsew")
+        col3_frame = ttk.Frame(self.point_scroll_frame); col3_frame.grid(row=0, column=2, padx=5, pady=10, sticky="nsew")
         
-        self._entry(f, r, "Pan Target", self.point_pan_target); r += 1
-        self._entry(f, r, "Tilt Target", self.point_tilt_target); r += 1
-        self._entry(f, r, "Move Speed", self.point_speed); r += 1
-        self._entry(f, r, "Move Accel", self.point_acc); r += 1
-        Button(f, text="Move to Target", bg="green", fg="white", command=self.pointing_move).grid(row=r, column=0, columnspan=4, sticky="ew", padx=4, pady=4)
-        r += 1
+        self.point_scroll_frame.grid_columnconfigure(0, weight=1)
+        self.point_scroll_frame.grid_columnconfigure(1, weight=1)
+        self.point_scroll_frame.grid_columnconfigure(2, weight=1)
         
-        self.point_result_lbl = Label(f, text="", fg="blue")
-        self.point_result_lbl.grid(row=r, column=0, columnspan=4, sticky="w", padx=4, pady=4)
+        # 1. Pointing Settings
+        point_set_frame = ttk.LabelFrame(col1_frame, text="Pointing Settings")
+        point_set_frame.pack(padx=5, pady=5, fill="both", expand=True)
+        def add_entry(parent, label, var, r):
+            ttk.Label(parent, text=label).grid(row=r, column=0, sticky="w", padx=5, pady=2)
+            ttk.Entry(parent, textvariable=var, width=10).grid(row=r, column=1, sticky="w", padx=5, pady=2)
         
-        # Debug Preview (right side)
-        debug_frame = Frame(tab_point, bg="#111", width=420, height=420, relief="solid", borderwidth=2)
+        add_entry(point_set_frame, "Laser ROI Size (px):", self.pointing_roi_size, 0)
+        ttk.Label(point_set_frame, text="--- Pointing Settings ---").grid(row=1, column=0, columnspan=2, pady=5)
+        add_entry(point_set_frame, "Tolerance (px):", self.pointing_px_tol, 2)
+        add_entry(point_set_frame, "Min Stable Frames:", self.pointing_min_frames, 3)
+        add_entry(point_set_frame, "Max Step (deg):", self.pointing_max_step, 4)
+        add_entry(point_set_frame, "Cooldown (ms):", self.pointing_cooldown, 5)
+        add_entry(point_set_frame, "LED Settle (s):", self.led_settle, 6)
+        
+        # 2. Pointing Control
+        point_ctrl_frame = ttk.LabelFrame(col2_frame, text="Pointing Control")
+        point_ctrl_frame.pack(padx=5, pady=5, fill="both", expand=True)
+        ttk.Checkbutton(point_ctrl_frame, text="Enable Pointing Mode", variable=self.pointing_enable, command=self.on_pointing_toggle).pack(anchor="w", padx=5, pady=5)
+        
+        # 3. CSV Analysis
+        point_csv_frame = ttk.LabelFrame(col3_frame, text="CSV Analysis (Legacy)")
+        point_csv_frame.pack(padx=5, pady=5, fill="both", expand=True)
+        ttk.Label(point_csv_frame, textvariable=self.point_csv_path, wraplength=200).pack(anchor="w", padx=5, pady=2)
+        
+        ttk.Label(point_csv_frame, text="Conf Min:").pack(anchor="w", padx=5)
+        ttk.Entry(point_csv_frame, textvariable=self.point_conf_min, width=15).pack(anchor="w", padx=5)
+        ttk.Label(point_csv_frame, text="Min Samples:").pack(anchor="w", padx=5)
+        ttk.Entry(point_csv_frame, textvariable=self.point_min_samples, width=15).pack(anchor="w", padx=5)
+        
+        self.point_result_lbl = ttk.Label(point_csv_frame, text="Result: -")
+        self.point_result_lbl.pack(anchor="w", padx=5, pady=5)
+        ttk.Button(point_csv_frame, text="Load CSV", command=self.pointing_choose_csv).pack(anchor="w", padx=5, pady=2)
+        ttk.Button(point_csv_frame, text="Move to Target", command=self.pointing_move).pack(anchor="w", padx=5, pady=5)
+        
+        # Debug Preview
+        debug_frame = Frame(self.tab_point, bg="#111", width=420, height=420, relief="solid", borderwidth=2)
         debug_frame.pack(side="right", padx=10, pady=10)
         debug_frame.pack_propagate(False)
-        
         Label(debug_frame, text="Debug Target Preview", bg="#111", fg="white", font=("", 10, "bold")).pack(pady=5)
         self.debug_preview_label = Label(debug_frame, bg="#111", fg="#666", text="(Waiting for detection...)")
         self.debug_preview_label.pack(fill="both", expand=True, padx=10, pady=10)
-        self.debug_preview_img = None
-    
-    # ========== Preview Box ==========
-    
-    def _setup_preview_box(self):
-        """Setup preview display box"""
-        preview_frame = Frame(self.root, bg="black", width=self.PREV_W, height=self.PREV_H)
-        preview_frame.pack(side="bottom", fill="both", expand=False, padx=4, pady=4)
-        preview_frame.pack_propagate(False)
-        
-        self.preview_label = Label(preview_frame, bg="black")
-        self.preview_label.pack(fill="both", expand=True)

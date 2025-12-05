@@ -58,14 +58,6 @@ class AppHelpersMixin:
         d_tilt = max(min(d_tilt, max_step), -max_step)
         return d_pan, d_tilt
 
-    def _load_image_from_file(self, path):
-        """파일에서 이미지 로드 - delegates to ImageProcessor"""
-        return self.image_processor.load_image(path)
-
-    def _load_image_pair(self, path_on, path_off):
-        """ON/OFF 이미지 쌍 로드 - delegates to ImageProcessor"""
-        return self.image_processor.load_image_pair(path_on, path_off)
-
     def _get_device(self):
         """YOLO/Torch 디바이스 반환 - delegates to YOLOProcessor"""
         return self.yolo_processor.get_device()

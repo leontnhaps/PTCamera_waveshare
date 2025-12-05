@@ -277,16 +277,6 @@ class PointingHandlerMixin:
             self.point_csv_path.set(path)
             self.pointing_compute()
 
-    @staticmethod
-    def _linfit_xy(x, y):
-        import numpy as np
-        x = np.asarray(x, float); y = np.asarray(y, float)
-        if len(x) < 2:
-            return None
-        A = np.vstack([x, np.ones_like(x)]).T
-        a, b = np.linalg.lstsq(A, y, rcond=None)[0]
-        return float(a), float(b)
-
     def pointing_compute(self):
         """
         CSV를 읽어:

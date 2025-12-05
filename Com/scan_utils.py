@@ -10,8 +10,7 @@ import csv
 import re
 import pathlib
 import threading
-import queue  # ← Worker Thread용 Queue 추가
-
+import queue
 
 class ScanController:
     """실시간 스캔 처리 관리자 - Worker Thread pattern for async processing"""
@@ -25,7 +24,7 @@ class ScanController:
         self.is_scanning = False
         self.yolo_weights_path = None
         
-        # Real-time processing buffer: (pan, tilt) -> {'on': img_ud, 'off': img_ud}
+        # Real-time processing buffer: (pan, tilt) -> {'on': img, 'off': img}
         self.image_pairs = {}
         
         # CSV writer
@@ -41,32 +40,16 @@ class ScanController:
         self.processing_queue = queue.Queue(maxsize=50)  # 이미지 처리 큐
         self.worker_thread = None
         self.worker_running = False
-        
-        # CSV writer
-        self.csv_writer = None
-        self.csv_file = None
-        self.csv_path = None
-        
-        # Statistics
-        self.processed_count = 0
-        self.detected_count = 0
-        # ===== Worker Thread (핵심 최적화!) =====
-        self.processing_queue = queue.Queue(maxsize=50)  # 이미지 처리 큐
-        self.worker_thread = None
-        self.worker_running = False
     
     def _start_worker_thread(self):
-        """Start background worker thread for heavy processing"""
         if self.worker_thread and self.worker_thread.is_alive():
             return
-        
         self.worker_running = True
         self.worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
         self.worker_thread.start()
         print("[ScanController] Worker thread started")
     
     def _stop_worker_thread(self):
-        """Stop worker thread"""
         self.worker_running = False
         if self.worker_thread:
             self.worker_thread.join(timeout=2.0)
@@ -76,32 +59,24 @@ class ScanController:
         """Worker thread loop - processes images asynchronously"""
         while self.worker_running:
             try:
-                # Get task from queue (timeout to check worker_running)
                 task = self.processing_queue.get(timeout=0.5)
-                if task is None:  # Poison pill
-                    break
-                
+                if task is None: break
                 pan, tilt, pair = task
                 self._process_pair(pan, tilt, pair)
                 self.processing_queue.task_done()
-                
             except queue.Empty:
                 continue
             except Exception as e:
                 print(f"[ScanController] Worker error: {e}")
     
     def start_scan(self, session_name, yolo_path):
-        """Start scan - create CSV file and worker thread"""
         self.is_scanning = True
         self.yolo_weights_path = yolo_path
         self.image_pairs.clear()
         self.processed_count = 0
         self.detected_count = 0
-        
-        # Start worker thread
         self._start_worker_thread()
         
-        # Create CSV file
         self.csv_path = self.output_dir / f"{session_name}_detections.csv"
         try:
             self.csv_file = open(self.csv_path, "w", newline="", encoding="utf-8")
@@ -111,72 +86,58 @@ class ScanController:
             return True
         except Exception as e:
             print(f"[ScanController] CSV creation failed: {e}")
-            self.csv_file = None
-            self.csv_writer = None
             return False
     
     def on_image_received(self, name, data):
-        """Process received image"""
-        # Save to file (existing feature)
+        # Save to file
         file_path = self.output_dir / name
         try:
-            with open(file_path, 'wb') as f:
-                f.write(data)
+            with open(file_path, 'wb') as f: f.write(data)
         except Exception as e:
             print(f"[ScanController] File save failed: {e}")
         
-        # Parse pan/tilt from filename: "img_t045_p090_..._led_on.jpg"
+        # Parse pan/tilt
         match = re.search(r't([+-]?\d+)_p([+-]?\d+)', name)
-        if not match:
-            return data  # Return for preview
+        if not match: return data
         
         tilt = int(match.group(1))
         pan = int(match.group(2))
         
-        # Real-time processing (if scanning)
         if self.is_scanning:
             self._process_realtime(name, data, pan, tilt)
         
-        return data  # Return for preview
+        return data
     
     def _process_realtime(self, name, data, pan, tilt):
-        """Real-time processing: undistort → buffer → enqueue when pair complete"""
-        # Decode image
+        # Decode
         try:
             img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
-            if img is None:
-                return
+            if img is None: return
         except Exception as e:
             print(f"[ScanController] Image decode failed: {e}")
             return
         
-        # Undistort (여전히 메인 스레드에서 - 빠름)
-        img_ud = self.image_processor.undistort(img, use_torch=True)
-        
-        # Store in buffer
+        # [수정됨] 여기서 undistort 하지 않음! (렉 방지) -> 원본 저장
         key = (pan, tilt)
         if 'led_on' in name:
-            self.image_pairs.setdefault(key, {})['on'] = img_ud
+            self.image_pairs.setdefault(key, {})['on'] = img
         elif 'led_off' in name:
-            self.image_pairs.setdefault(key, {})['off'] = img_ud
+            self.image_pairs.setdefault(key, {})['off'] = img
         
-        # Check if pair is complete
+        # Pair complete check
         pair = self.image_pairs.get(key, {})
         if 'on' in pair and 'off' in pair:
-            # ===== 핵심: Worker Thread로 전달 =====
             try:
                 self.processing_queue.put_nowait((pan, tilt, pair))
-                del self.image_pairs[key]  # Free memory immediately
+                del self.image_pairs[key]
             except queue.Full:
                 print(f"[ScanController] Queue full, skipping ({pan}, {tilt})")
                 del self.image_pairs[key]
     
     def _process_pair(self, pan, tilt, pair):
-        """Process complete pair: diff → YOLO → CSV"""
-        # Import here to avoid circular dependency at module load time
+        """Worker Thread 내부에서 실행됨"""
         from yolo_utils import predict_with_tiling
-        
-        # YOLO constants (copied from Com_main to avoid circular import)
+        # YOLO constants
         YOLO_TILE_ROWS = 2
         YOLO_TILE_COLS = 3
         YOLO_TILE_OVERLAP = 0.15
@@ -184,14 +145,17 @@ class ScanController:
         YOLO_IOU_THRESHOLD = 0.45
         
         try:
-            # Calculate difference
-            diff = cv2.absdiff(pair['on'], pair['off'])
+            # [수정됨] 여기서 Undistort 수행 (백그라운드 처리)
+            img_on_ud = self.image_processor.undistort(pair['on'], use_torch=True)
+            img_off_ud = self.image_processor.undistort(pair['off'], use_torch=True)
+            
+            # Calculate difference using undistorted images
+            diff = cv2.absdiff(img_on_ud, img_off_ud)
             H, W = diff.shape[:2]
             
             # YOLO detection
             model = self.yolo_processor.get_model(self.yolo_weights_path)
-            if model is None:
-                return
+            if model is None: return
             
             device = self.yolo_processor.get_device()
             
@@ -203,7 +167,6 @@ class ScanController:
                 device=device
             )
             
-            # Write to CSV
             if boxes and self.csv_writer:
                 for i, (x, y, w, h) in enumerate(boxes):
                     self.csv_writer.writerow([
@@ -211,7 +174,7 @@ class ScanController:
                         float(scores[i]), int(classes[i]), W, H
                     ])
                     self.detected_count += 1
-                self.csv_file.flush()  # Immediate write to disk
+                self.csv_file.flush()
             
             self.processed_count += 1
             
@@ -219,17 +182,12 @@ class ScanController:
             print(f"[ScanController] Pair processing failed ({pan}, {tilt}): {e}")
     
     def stop_scan(self):
-        """Stop scan - close CSV"""
         self.is_scanning = False
-        
         if self.csv_file:
             self.csv_file.close()
             self.csv_file = None
             self.csv_writer = None
         
-        print(f"[ScanController] Scan stopped. Processed: {self.processed_count}, Detected: {self.detected_count}")
-        
-        # Clear buffer
         self.image_pairs.clear()
         
         return {

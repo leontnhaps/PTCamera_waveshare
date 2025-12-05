@@ -33,6 +33,52 @@ graph LR
 
 ---
 
+## 🧠 핵심 알고리즘 상세 분석 (Core Algorithms)
+
+이 프로젝트의 핵심 기술은 **스캔(Scanning)**과 **정밀 조준(Pointing)** 두 단계로 나뉩니다.
+
+### 1. 📷 Scanning Algorithm (광역 탐색)
+
+전체 작업 공간을 격자(Grid) 형태로 스캔하여 타겟 후보군을 탐색하고 위치 데이터를 수집합니다.
+
+1.  **Grid Traversal**: 설정된 Pan/Tilt 범위(예: -40°~40°)를 일정 간격으로 순회합니다.
+2.  **Difference Imaging (차분 영상)**:
+    *   각 위치에서 **LED ON** 이미지와 **LED OFF** 이미지를 연속 촬영합니다.
+    *   `Diff = |Image_ON - Image_OFF|` 연산을 통해 주변광을 제거하고 반사판(Retro-reflector)의 특징을 극대화합니다.
+3.  **Undistortion (왜곡 보정)**:
+    *   사전에 계산된 `calib.npz` (Camera Matrix **K**, Distortion Coeffs **D**)를 사용하여 광각 렌즈의 왜곡을 보정합니다.
+    *   실시간 처리를 위해 CUDA/Torch 가속을 지원합니다.
+4.  **Hybrid YOLO Detection**:
+    *   **Tiling**: 고해상도 이미지를 2x3 그리드로 분할하여 작은 객체 탐지율을 높입니다.
+    *   **Full Inference**: 전체 이미지에 대해서도 추론하여 큰 객체나 잘린 객체를 보완합니다.
+    *   **NMS (Non-Max Suppression)**: 분할 및 전체 추론 결과를 병합하여 중복된 박스를 제거합니다.
+5.  **Data Logging**: 탐지된 객체의 Pan/Tilt 각도와 BBox 정보를 CSV로 저장합니다.
+
+### 2. 🎯 Pointing Algorithm (정밀 조준)
+
+수집된 데이터를 바탕으로 타겟의 중심을 추정하고, 레이저 피드백 제어를 통해 오차를 최소화합니다.
+
+#### Phase 1: Coarse Alignment (선형 회귀 추정)
+스캔 데이터(CSV)를 분석하여 타겟이 이미지 중심(Optical Axis)에 오게 될 Pan/Tilt 각도를 예측합니다.
+*   **Linear Regression**:
+    *   `Pixel_X ≈ a * Pan + b`
+    *   `Pixel_Y ≈ c * Tilt + d`
+*   위 회귀식을 역산하여 `Pixel_X = Width/2`, `Pixel_Y = Height/2`가 되는 `(Pan_Target, Tilt_Target)`을 계산하고 고속 이동합니다.
+
+#### Phase 2: Laser Servoing (Closed-loop Control)
+이동 후, 실제 레이저 위치와 타겟 위치의 오차를 실시간으로 보정합니다.
+1.  **Laser Detection**:
+    *   레이저를 깜빡이며(ON/OFF) 차분 영상을 획득합니다.
+    *   **Weighted Centroid**: 차분 영상의 밝기 모멘트(Moments)를 계산하여 레이저의 중심 좌표 $(L_x, L_y)$를 서브픽셀 단위로 검출합니다.
+2.  **Target Detection**:
+    *   동일한 시점의 영상에서 YOLO를 통해 타겟의 중심 좌표 $(T_x, T_y)$를 획득합니다.
+3.  **Feedback Control**:
+    *   오차 벡터 $(\Delta x, \Delta y) = (T_x - L_x, T_y - L_y)$를 계산합니다.
+    *   비례 제어(P-Control)를 통해 Pan/Tilt 보정량을 산출하여 모터를 미세 조정합니다.
+    *   오차가 허용 범위(Tolerance) 이내로 들어올 때까지 반복합니다.
+
+---
+
 ## 📂 상세 코드 분석 (Codebase Analysis)
 
 프로젝트의 핵심 로직이 담긴 각 파이썬 파일에 대한 상세 설명입니다.
@@ -90,24 +136,6 @@ PC와 라즈베리파이 간의 통신을 중계합니다.
 *   **`Server_main.py` (Socket Broker)**
     *   TCP/IP 소켓 서버를 열어 PC와 라즈베리파이의 연결을 수락합니다.
     *   PC에서 보낸 제어 명령을 라즈베리파이로 전달하고, 라즈베리파이에서 보낸 이미지 데이터를 PC로 전달하는 라우팅 역할을 합니다.
-
----
-
-## 🚀 주요 기능 상세
-
-### 1. 📷 광역 스캔 (Scanning)
-*   **Grid Scan**: 설정된 Pan/Tilt 범위(예: -40°~40°)를 자동으로 순회하며 촬영합니다.
-*   **Difference Imaging**: 각 위치에서 LED를 켜고 끈 두 장의 이미지를 촬영하여 차분 영상을 생성, 조명 변화에 강인한 탐지를 수행합니다.
-*   **Auto Logging**: 탐지된 객체의 좌표와 이미지를 CSV 및 파일로 자동 저장합니다.
-
-### 2. 🎯 정밀 조준 (Pointing)
-*   **Click-to-Point**: 스캔 결과(CSV)에서 타겟을 선택하거나 수동으로 좌표를 입력하여 조준을 시작합니다.
-*   **Laser Feedback**: 레이저를 켜고 끄며 위치를 인식, 타겟과의 오차를 계산하여 실시간으로 보정합니다(Closed-loop Control).
-*   **Sub-pixel Accuracy**: 무게중심(Centroid) 알고리즘을 통해 픽셀 단위 이하의 정밀도를 달성합니다.
-
-### 3. 🖼️ 이미지 처리 (Image Processing)
-*   **Real-time Undistortion**: `calib.npz` 데이터를 로드하여 광각 렌즈의 휘어짐을 실시간으로 폅니다.
-*   **Snap & Save**: 현재 화면을 캡처하며, 원본과 왜곡 보정본(.ud.jpg)을 동시에 저장할 수 있습니다.
 
 ---
 
