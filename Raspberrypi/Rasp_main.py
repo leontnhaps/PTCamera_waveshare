@@ -164,8 +164,7 @@ def scan_worker(params, ctrl_sock: socket.socket, img_sock: socket.socket):
         speed  = int(params.get("speed",100))
         acc    = float(params.get("acc",1.0))
         settle = float(params.get("settle",0.25))
-        led_settle = float(params.get("led_settle",0.15))  # LED 안정화 시간
-        hard_stop = bool(params.get("hard_stop", False))
+        led_settle = float(params.get("led_settle",0.15))
 
         def send_evt(obj):
             try: ctrl_sock.sendall((json.dumps(obj,separators=(",",":"))+"\n").encode())
@@ -177,10 +176,8 @@ def scan_worker(params, ctrl_sock: socket.socket, img_sock: socket.socket):
         # === 스캔 시작 전 첫 위치로 이동 (촬영 안 함) ===
         first_pan = pans[0]
         first_tilt = tilts[0]
-        send_to_slave({"T":133, "X": float(first_pan), "Y": float(first_tilt), "SPD": speed, "ACC": acc})
-        time.sleep(5.0)  # 도착 대기
-        if hard_stop:
-            send_to_slave({"T":135}); time.sleep(0.02)
+        send_to_slave({"T":133, "X": float(first_pan), "Y": float(first_tilt), "SPD": 100, "ACC": 1.0})
+        time.sleep(2.0)  # 도착 대기
         # ===============================================
 
         for i,t in enumerate(tilts):
@@ -191,8 +188,6 @@ def scan_worker(params, ctrl_sock: socket.socket, img_sock: socket.socket):
                 # 이동
                 send_to_slave({"T":133, "X": float(p), "Y": float(t), "SPD": speed, "ACC": acc})
                 time.sleep(settle)
-                if hard_stop:
-                    send_to_slave({"T":135}); time.sleep(0.02)
 
 
                 # === LED ON → 촬영 ===
@@ -240,7 +235,7 @@ def scan_worker(params, ctrl_sock: socket.socket, img_sock: socket.socket):
 # ===================== 스냅(한 장 캡처) =====================
 def snap_once(cmd: dict, img_sock: socket.socket, ctrl_sock: socket.socket):
     """
-    {"cmd":"snap","width","height","quality","save","hard_stop"} 처리.
+    {"cmd":"snap","width","height","quality","save"} 처리.
     스캔과 동일한 경로( ISP JPEG )로 캡처해서 확실히 전송.
     """
     try:
@@ -255,8 +250,6 @@ def snap_once(cmd: dict, img_sock: socket.socket, ctrl_sock: socket.socket):
         H = int(cmd.get("height", MAX_H))
         Q = int(cmd.get("quality", 90))
         fname = cmd.get("save") or datetime.datetime.now().strftime("snap_%Y%m%d_%H%M%S.jpg")
-        if bool(cmd.get("hard_stop", False)):
-            send_to_slave({"T":135}); time.sleep(0.02)
 
         # 스캔과 동일한 경로: 스틸 모드 전환 + 3A 대기 후 capture_file
         to_still(W, H, Q)

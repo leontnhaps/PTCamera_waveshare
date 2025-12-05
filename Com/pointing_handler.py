@@ -73,7 +73,7 @@ class PointingHandlerMixin:
         wait_ms = int(self.led_settle.get() * 1000)
         self.root.after(wait_ms, lambda: self.ctrl.send({
             "cmd":"snap", "width":self.width.get(), "height":self.height.get(),
-            "quality":self.quality.get(), "save":"pointing_laser_on.jpg", "hard_stop":False
+            "quality":self.quality.get(), "save":"pointing_laser_on.jpg"
         }))
 
     def _run_pointing_laser_logic(self, img_on, img_off):

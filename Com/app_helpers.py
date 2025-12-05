@@ -17,7 +17,7 @@ class AppHelpersMixin:
     
     # ========== Command Helpers ==========
     
-    def _send_snap_cmd(self, save_name: str, hard_stop: bool = False):
+    def _send_snap_cmd(self, save_name: str):
         """Snap 명령 전송 헬퍼"""
         self.ctrl.send({
             "cmd": "snap",
@@ -25,7 +25,6 @@ class AppHelpersMixin:
             "height": self.height.get(),
             "quality": self.quality.get(),
             "save": save_name,
-            "hard_stop": hard_stop,
             "ud_save": self.ud_save_copy.get()
         })
 

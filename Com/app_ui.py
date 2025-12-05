@@ -36,7 +36,6 @@ class AppUIMixin:
         self._entry(tab_scan, r, "Accel", self.acc); r += 1
         self._entry(tab_scan, r, "Settle(s)", self.settle); r += 1
         self._entry(tab_scan, r, "LED Settle(s)", self.led_settle); r += 1
-        Checkbutton(tab_scan, text="Hard stop(정지 펄스)", variable=self.hard_stop).grid(row=r, column=1, sticky="w", padx=4, pady=2); r += 1
         
         ops = Frame(tab_scan); ops.grid(row=r, column=0, columnspan=4, sticky="w", pady=6)
         Button(ops, text="Start Scan", command=self.start_scan).pack(side="left", padx=4)

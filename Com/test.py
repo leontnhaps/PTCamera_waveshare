@@ -60,9 +60,8 @@ class App(AppHelpersMixin, PointingHandlerMixin, EventHandlersMixin, AppUIMixin)
         self.pan_min=IntVar(value=-180); self.pan_max=IntVar(value=180); self.pan_step=IntVar(value=15)
         self.tilt_min=IntVar(value=-30); self.tilt_max=IntVar(value=90);  self.tilt_step=IntVar(value=15)
         self.width=IntVar(value=2592);   self.height=IntVar(value=1944); self.quality=IntVar(value=90)
-        self.speed=IntVar(value=100);    self.acc=DoubleVar(value=1.0);  self.settle=DoubleVar(value=0.6)
+        self.speed=IntVar(value=0);    self.acc=DoubleVar(value=0.0);  self.settle=DoubleVar(value=0.05)
         self.led_settle=DoubleVar(value=0.4)
-        self.hard_stop = BooleanVar(value=False)
 
         # Pointing variables
         self.point_csv_path = StringVar(value="")
@@ -178,8 +177,7 @@ class App(AppHelpersMixin, PointingHandlerMixin, EventHandlersMixin, AppUIMixin)
             "speed":self.speed.get(),"acc":float(self.acc.get()),"settle":float(self.settle.get()),
             "led_settle":float(self.led_settle.get()),
             "width":self.width.get(),"height":self.height.get(),"quality":self.quality.get(),
-            "session":datetime.now().strftime("scan_%Y%m%d_%H%M%S"),
-            "hard_stop":self.hard_stop.get()
+            "session":datetime.now().strftime("scan_%Y%m%d_%H%M%S")
         })
 
     def stop_scan(self):
@@ -218,7 +216,7 @@ class App(AppHelpersMixin, PointingHandlerMixin, EventHandlersMixin, AppUIMixin)
             self.ctrl.send({"cmd":"preview","enable": False})
             self._resume_preview_after_snap = True
         fname = datetime.now().strftime("snap_%Y%m%d_%H%M%S.jpg")
-        self._send_snap_cmd(fname, self.hard_stop.get())
+        self._send_snap_cmd(fname)
 
 def main():
     root = Tk()

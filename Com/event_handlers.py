@@ -167,7 +167,7 @@ class EventHandlersMixin:
         wait_ms = int(self.led_settle.get() * 1000)
         self.root.after(wait_ms, lambda: self.ctrl.send({
             "cmd": "snap", "width": self.width.get(), "height": self.height.get(),
-            "quality": self.quality.get(), "save": "pointing_laser_off.jpg", "hard_stop": False,
+            "quality": self.quality.get(), "save": "pointing_laser_off.jpg",
             "ud_save": self.ud_save_copy.get()
         }))
     
@@ -194,7 +194,7 @@ class EventHandlersMixin:
         wait_ms = int(self.led_settle.get() * 1000)
         self.root.after(wait_ms, lambda: self.ctrl.send({
             "cmd": "snap", "width": self.width.get(), "height": self.height.get(),
-            "quality": self.quality.get(), "save": "pointing_led_on.jpg", "hard_stop": False,
+            "quality": self.quality.get(), "save": "pointing_led_on.jpg",
             "ud_save": self.ud_save_copy.get()
         }))
     
@@ -210,7 +210,7 @@ class EventHandlersMixin:
         wait_ms = int(self.led_settle.get() * 1000)
         self.root.after(wait_ms, lambda: self.ctrl.send({
             "cmd": "snap", "width": self.width.get(), "height": self.height.get(),
-            "quality": self.quality.get(), "save": "pointing_led_off.jpg", "hard_stop": False,
+            "quality": self.quality.get(), "save": "pointing_led_off.jpg",
             "ud_save": self.ud_save_copy.get()
         }))
     
