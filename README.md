@@ -31,6 +31,87 @@ graph LR
     PC -->|CUDA/Torch| GPU[🚀 AI/Image Proc]
 ```
 
+# Pan-Tilt Tracking System Logic
+
+```mermaid
+flowchart TD
+    %% === PC Client Group ===
+    subgraph PC_Client ["PC Client (Logic)"]
+        direction TB
+        Start("Start Pointing") --> InitLog["Init CSV & PV Monitor"]
+        InitLog --> CheckInterval{"Interval OK?"}
+        
+        %% Step 1: Laser
+        CheckInterval -- Yes --> SendLaserOn["CMD: Laser ON"]
+        SendLaserOn --> Wait1["Wait Settle"] --> SendSnap1["CMD: Snap Laser_ON"]
+        
+        RecvImg1("Receive Image") --> ProcLaser["Find Laser Center"]
+        ProcLaser --> LaserFound{"Laser Found?"}
+        
+        %% Step 2: Object
+        LaserFound -- Yes --> SendLedOn["CMD: LED ON"]
+        SendLedOn --> Wait2["Wait Settle"] --> SendSnap2["CMD: Snap LED_ON"]
+        
+        SendSnap2 --> SendLedOff["CMD: LED OFF"]
+        SendLedOff --> Wait3["Wait Settle"] --> SendSnap3["CMD: Snap LED_OFF"]
+        
+        RecvImg2("Receive Images") --> ProcYOLO["YOLO Detect Object"]
+        ProcYOLO --> ObjFound{"Object Found?"}
+        
+        %% Step 3: Control
+        ObjFound -- Yes --> CalcErr["Calc Error"]
+        CalcErr --> CheckStable{"Error < Tol?"}
+        
+        CheckStable -- No --> CalcPID["Calc Pan/Tilt Delta"]
+        CalcPID --> SendMove["CMD: Move Servo"]
+        SendMove --> LogData["Log Data"] --> CheckInterval
+        
+        %% End states
+        CheckStable -- Yes --> Success("Pointing Complete")
+        LaserFound -- No --> Error1["Log: Laser Lost"] --> CheckInterval
+        ObjFound -- No --> Error2["Log: Object Lost"] --> CheckInterval
+    end
+
+    %% === Network Group ===
+    subgraph Network ["Server Broker"]
+        direction TB
+        Msg1(("JSON/IMG Transfer"))
+    end
+
+    %% === Raspberry Pi Group ===
+    subgraph Pi_Agent ["Raspberry Pi (Hardware)"]
+        direction TB
+        Listen{"Wait for CMD"}
+        
+        Listen -- "cmd: laser" --> ActionLaser["GPIO Control"]
+        Listen -- "cmd: snap" --> ActionSnap["Picamera Capture"]
+        Listen -- "cmd: led" --> ActionLED["ESP32 LED"]
+        Listen -- "cmd: move" --> ActionServo["ESP32 Servo"]
+        
+        ActionSnap --> SendImg["Send JPEG"]
+        ActionLaser --> Listen
+        ActionLED --> Listen
+        ActionServo --> Listen
+    end
+
+    %% Connections
+    SendLaserOn -.-> Msg1
+    SendSnap1 -.-> Msg1
+    SendLedOn -.-> Msg1
+    SendMove -.-> Msg1
+    
+    Msg1 -.-> Listen
+    SendImg -.-> Msg1
+    Msg1 -.-> RecvImg1
+    Msg1 -.-> RecvImg2
+
+    %% Styles
+    style PC_Client fill:#e1f5fe,stroke:#01579b
+    style Pi_Agent fill:#fff3e0,stroke:#e65100
+    style Network fill:#f3e5f5,stroke:#4a148c
+    style Success fill:#ccff90,stroke:#33691e,stroke-width:2px
+```
+
 ---
 
 ## 🧠 핵심 알고리즘 상세 분석 (Core Algorithms)
