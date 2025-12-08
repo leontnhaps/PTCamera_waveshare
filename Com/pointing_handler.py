@@ -128,7 +128,7 @@ class PointingHandlerMixin:
             YOLO_TILE_ROWS = 2
             YOLO_TILE_COLS = 3
             YOLO_TILE_OVERLAP = 0.15
-            YOLO_CONF_THRESHOLD = 0.20
+            YOLO_CONF_THRESHOLD = 0.50
             YOLO_IOU_THRESHOLD = 0.45
             
             boxes, scores, classes = predict_with_tiling(model, diff, rows=YOLO_TILE_ROWS, cols=YOLO_TILE_COLS, overlap=YOLO_TILE_OVERLAP, conf=YOLO_CONF_THRESHOLD, iou=YOLO_IOU_THRESHOLD, device=device)
