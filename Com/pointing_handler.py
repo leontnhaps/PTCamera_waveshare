@@ -48,10 +48,10 @@ class PointingHandlerMixin:
         gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
         
         cv_thresh = 70
-        _, binary = cv2.threshold(gray, cv_thresh, 255, cv2.THRESH_BINARY)
+        _, filted_gray = cv2.threshold(gray, cv_thresh, 255, cv2.THRESH_TOZERO)
 
         # Calculate brightness centroid using moments
-        M = cv2.moments(binary)
+        M = cv2.moments(filted_gray)
         if M["m00"] == 0:
             return None
         
@@ -83,10 +83,9 @@ class PointingHandlerMixin:
             laser_pos = self._find_laser_center(img_on, img_off)
             
             if laser_pos is None:
-                # Laser not found -> Retry cycle (no movement)
-                ui_q.put(("toast", "⚠️ Laser not found -> Retry"))
-                self._pointing_state = 0
-                self._pointing_last_ts = time.time() * 1000
+                self._laser_px = None
+                ui_q.put(("toast", "⚠️ Laser not found -> Original Scheme "))
+                ui_q.put(("pointing_step_2", None))
                 return
 
             # Laser Found -> Proceed to Object Detection
@@ -157,9 +156,14 @@ class PointingHandlerMixin:
             target_y_offset = 5.0 * px_per_cm
             target_px = (obj_cx, obj_cy + target_y_offset)
             
+            if self._laser_px is not None:
+                # [레이저 인식] 
+                ref_point = self._laser_px
+            else : 
+                ref_point = (W/2.0, H/2.0)
             
-            err_x = target_px[0] - self._laser_px[0]
-            err_y = target_px[1] - self._laser_px[1]
+            err_x = target_px[0] - ref_point[0]
+            err_y = target_px[1] - ref_point[1]
             # [DEBUG] Save target visualization (UD applied!)
             debug_target = diff.copy()  # diff는 이미 UD 적용된 img_on, img_off의 차분!
             debug_target = cv2.cvtColor(debug_target, cv2.COLOR_GRAY2BGR) if len(debug_target.shape) == 2 else debug_target
@@ -168,9 +172,10 @@ class PointingHandlerMixin:
             cv2.drawMarker(debug_target, (int(target_px[0]), int(target_px[1])), (0, 0, 255), cv2.MARKER_CROSS, 50, 3)
             cv2.putText(debug_target, "TARGET", (int(target_px[0])+15, int(target_px[1])-15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
             # 레이저 위치 (녹색)
-            cv2.circle(debug_target, self._laser_px, 12, (0, 255, 0), 3)
-            cv2.drawMarker(debug_target, self._laser_px, (0, 255, 0), cv2.MARKER_CROSS, 50, 3)
-            cv2.putText(debug_target, "LASER", (self._laser_px[0]+15, self._laser_px[1]-15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            if self._laser_px is not None:
+                cv2.circle(debug_target, self._laser_px, 12, (0, 255, 0), 3)
+                cv2.drawMarker(debug_target, self._laser_px, (0, 255, 0), cv2.MARKER_CROSS, 50, 3)
+                cv2.putText(debug_target, "LASER", (self._laser_px[0]+15, self._laser_px[1]-15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             # 객체 BBox (노란색)
             cv2.rectangle(debug_target, (int(x), int(y)), (int(x+w), int(y+h)), (0, 255, 255), 3)
             cv2.putText(debug_target, "OBJECT", (int(x), int(y)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
@@ -200,38 +205,60 @@ class PointingHandlerMixin:
             if abs(err_x) <= tol and abs(err_y) <= tol:
                 self._pointing_stable_cnt += 1
                 ui_q.put(("toast", f"✅ Pointing Converging... {self._pointing_stable_cnt}/{self.pointing_min_frames.get()}"))
-                if self._pointing_stable_cnt >= self.pointing_min_frames.get():
+            
+            else:
+                self._pointing_stable_cnt = 0
+                
+            if self._pointing_stable_cnt >= self.pointing_min_frames.get():
+                if self._laser_px is not None:
                     ui_q.put(("toast", "🎉 Pointing Complete!"))
                     self.pointing_enable.set(False); ui_q.put(("preview_on", None))
                     self.ctrl.send({"cmd":"laser", "value":0}); self.laser_on.set(False)
                     self._pointing_state = 0
                     return
-            else:
-                self._pointing_stable_cnt = 0
+                else:
+                    ui_q.put(("toast", "⚠️ Center Locked but No Laser -> Scanning Down 1°..."))
+                    next_tilt = self._curr_tilt - 1.0 
+                    next_tilt = max(-30, min(90, next_tilt))
+                    self._curr_tilt = next_tilt
+                    # Pan은 그대로 둠
+                    self.ctrl.send({"cmd":"move", "pan":self._curr_pan, "tilt":next_tilt, "speed":self.speed.get(), "acc":float(self.acc.get())})
+                    
+                    # ★ 중요: 움직였으니까 다시 흔들림. 카운트 리셋해서 다시 확인하게 함.
+                    self._pointing_stable_cnt = 0
+                    
+                    # 루프 종료 (다음 사이클에서 레이저 다시 찾아봄)
+                    self._pointing_state = 0 
+                    self._pointing_last_ts = time.time() * 1000
+                    return
                 
-                # Move
-                # [MOD] 역산된 gain 사용 (없으면 기본값 사용됨)
-                k_p = getattr(self, '_computed_gain_pan', None)
-                k_t = getattr(self, '_computed_gain_tilt', None)
-                
-                kwargs = {}
-                if k_p is not None: kwargs['k_pan'] = k_p
-                if k_t is not None: kwargs['k_tilt'] = k_t
-                
-                d_pan, d_tilt = self._calculate_angle_delta(err_x, err_y, **kwargs)
-                
-                next_pan = self._curr_pan + d_pan
-                next_tilt = self._curr_tilt + d_tilt
-                
-                # Hardware limits
-                next_pan = max(-180, min(180, next_pan))
-                next_tilt = max(-30, min(90, next_tilt))
-                
-                self._curr_pan = next_pan
-                self._curr_tilt = next_tilt
-                
-                self.ctrl.send({"cmd":"move", "pan":next_pan, "tilt":next_tilt, "speed":self.speed.get(), "acc":float(self.acc.get())})
+            # [MOD] 역산된 gain 사용 (없으면 기본값 사용됨)
+            k_p = getattr(self, '_computed_gain_pan', None)
+            k_t = getattr(self, '_computed_gain_tilt', None)
             
+            kwargs = {}
+            if k_p is not None: kwargs['k_pan'] = k_p
+            if k_t is not None: kwargs['k_tilt'] = k_t
+            
+            # ▼▼▼ [여기!] 오차가 10 이하면 1도로 제한 거는 코드 추가 ▼▼▼
+            if abs(err_x) <= 10.0 and abs(err_y) <= 10.0:
+                kwargs['force_max_step'] = 1.0  # 강제로 1도 제한
+                # ui_q.put(("toast", "🤏 미세 조정 모드 (Max 1.0°)"))
+            
+            d_pan, d_tilt = self._calculate_angle_delta(err_x, err_y, **kwargs)
+            
+            next_pan = self._curr_pan + d_pan
+            next_tilt = self._curr_tilt + d_tilt
+            
+            # Hardware limits
+            next_pan = max(-180, min(180, next_pan))
+            next_tilt = max(-30, min(90, next_tilt))
+            
+            self._curr_pan = next_pan
+            self._curr_tilt = next_tilt
+            
+            self.ctrl.send({"cmd":"move", "pan":next_pan, "tilt":next_tilt, "speed":self.speed.get(), "acc":float(self.acc.get())})
+            ui_q.put(("toast", f" next pan : {next_pan} next tilt : {next_tilt}"))
             self._pointing_state = 0 # Cycle Done
             self._pointing_last_ts = time.time() * 1000
 
@@ -242,6 +269,7 @@ class PointingHandlerMixin:
     def on_pointing_toggle(self):
         """Handle pointing mode toggle ON/OFF"""
         if self.pointing_enable.get():
+            self.pv_monitor.clear_history()
             ui_q.put(("preview_on", None))
             # Laser OFF when starting
             self.ctrl.send({"cmd":"laser", "value": 0})

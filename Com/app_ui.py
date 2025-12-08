@@ -66,7 +66,9 @@ class AppUIMixin:
         for widget in tab_manual.winfo_children(): widget.destroy()
         
         self._slider(tab_manual, 0, "Pan", -180, 180, self.mv_pan, 0.5)
+        ttk.Entry(tab_manual, textvariable=self.mv_pan,width=8).grid(row=0,column=2,sticky="w",padx=5)
         self._slider(tab_manual, 1, "Tilt", -30, 90, self.mv_tilt, 0.5)
+        ttk.Entry(tab_manual, textvariable=self.mv_tilt,width=8).grid(row=1,column=2,sticky="w",padx=5)
         self._slider(tab_manual, 2, "Speed", 0, 100, self.mv_speed, 1)
         self._slider(tab_manual, 3, "Accel", 0, 1, self.mv_acc, 0.1)
         Button(tab_manual, text="Center (0,0)", command=self.center).grid(row=4, column=0, sticky="w", pady=4)

@@ -103,7 +103,7 @@ class App(AppHelpersMixin, PointingHandlerMixin, EventHandlersMixin, AppUIMixin)
         # PV Monitor variables
         self.pv_port = StringVar(value="COM8")
         self.pv_monitoring = BooleanVar(value=False)
-        self.pv_monitor = PVMonitor(max_history=100)
+        self.pv_monitor = PVMonitor(max_history=100, output_dir=DEFAULT_OUT_DIR)
 
         # ==== UI Layout (뼈대만 생성) ====
         # 1. Top Bar
@@ -307,6 +307,26 @@ class App(AppHelpersMixin, PointingHandlerMixin, EventHandlersMixin, AppUIMixin)
     
     def update_pv_graph(self):
         """Update PV monitoring graph"""
+        # [추가] 현재 보고 있는 탭이 'PV Monitor'가 아니면 그리지 말고 리턴!
+        # notebook.select()는 현재 선택된 탭의 위젯 ID를 반환합니다.
+        # setup_pv_tab에서 탭 위젯 이름을 저장해둬야 합니다.
+        
+        # 1. 현재 선택된 탭 확인
+        current_tab = self.notebook.select()
+        # 탭 이름을 가져옵니다. (참고: setup_ui에서 탭 위젯을 self.tab_pv 등으로 저장해두면 좋음)
+        # 간단하게 탭의 인덱스로 확인하는 방법:
+        current_idx = self.notebook.index(current_tab)
+        pv_tab_idx = -1
+        
+        # PV Monitor 탭의 인덱스 찾기
+        for i in range(self.notebook.index("end")):
+            if self.notebook.tab(i, "text") == "PV Monitor":
+                pv_tab_idx = i
+                break
+        
+        # 다른 탭 보고 있으면 그리기 중단 (데이터는 백그라운드에서 계속 쌓임)
+        if current_idx != pv_tab_idx:
+            return
         if not hasattr(self, 'pv_ax_voltage'):
             return  # UI not ready yet
         

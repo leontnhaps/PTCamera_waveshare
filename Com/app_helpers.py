@@ -48,11 +48,16 @@ class AppHelpersMixin:
         return self.image_processor.undistort(bgr, use_torch=True)
 
     def _calculate_angle_delta(self, err_x: float, err_y: float, 
-                               k_pan: float = CENTERING_GAIN_PAN, k_tilt: float = CENTERING_GAIN_TILT):
+                               k_pan: float = CENTERING_GAIN_PAN, k_tilt: float = CENTERING_GAIN_TILT,
+                               force_max_step: float = None):
         """픽셀 오차 → 각도 변환 (클램핑 포함)"""
         d_pan = err_x * k_pan
         d_tilt = -err_y * k_tilt
-        max_step = self.pointing_max_step.get()
+        if force_max_step is not None:
+            max_step = force_max_step
+        else: 
+            max_step = self.pointing_max_step.get()
+        
         d_pan = max(min(d_pan, max_step), -max_step)
         d_tilt = max(min(d_tilt, max_step), -max_step)
         return d_pan, d_tilt

@@ -10,12 +10,14 @@ import time
 from collections import deque
 from typing import Optional, Tuple, List
 import queue
-
+from datetime import datetime
+import csv
+import pathlib
 
 class PVMonitor:
     """Monitor for real-time voltage/current data from Arduino"""
     
-    def __init__(self, max_history: int = 100):
+    def __init__(self, max_history: int = 100, output_dir: Optional[str] = None):
         """
         Initialize PV Monitor
         
@@ -25,7 +27,7 @@ class PVMonitor:
         self.port: Optional[str] = None
         self.baud_rate: int = 9600
         self.serial_conn: Optional[serial.Serial] = None
-        
+        self.output_dir = output_dir  # 추가
         # Thread control
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -40,6 +42,10 @@ class PVMonitor:
         
         # Recording control
         self._recording = False
+        # 라인 42 근처에 추가
+        self._csv_file = None
+        self._csv_writer = None
+        self._csv_path = None
         
         # Latest values
         self._latest_voltage: float = 0.0
@@ -80,6 +86,19 @@ class PVMonitor:
             self._thread = threading.Thread(target=self._read_loop, daemon=True)
             self._thread.start()
             
+            # 라인 88-90 수정
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            csv_filename = f"pv_data_{timestamp}.csv"
+            # output_dir이 있으면 그 안에 저장
+            if self.output_dir:
+                import pathlib
+                self._csv_path = pathlib.Path(self.output_dir) / csv_filename
+            else:
+                self._csv_path = csv_filename
+            self._csv_file = open(self._csv_path, 'w', newline='')
+            self._csv_writer = csv.writer(self._csv_file)
+            self._csv_writer.writerow(['Time(s)', 'Voltage(V)', 'Current(mA)', 'Power(mW)'])
+            
             print(f"[PVMonitor] Started monitoring on {port}")
             return True
             
@@ -100,6 +119,10 @@ class PVMonitor:
         # Wait for thread to finish
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
+        self.clear_history()
+        if self._csv_file:
+            self._csv_file.close()
+            print(f"[PVMonitor] CSV saved: {self._csv_path}")
         
         # Close serial connection
         if self.serial_conn and self.serial_conn.is_open:
@@ -140,6 +163,8 @@ class PVMonitor:
                                     self._current_history.append(current)
                                     self._power_history.append(power)
                                     self._time_history.append(elapsed_time)
+                                    if self._csv_writer:
+                                        self._csv_writer.writerow([elapsed_time, voltage, current, power])
                                 
                         except ValueError:
                             # Invalid number format, skip

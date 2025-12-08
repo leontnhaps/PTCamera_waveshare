@@ -91,7 +91,7 @@ class EventHandlersMixin:
             self._last_pv_update = 0
             
         now = time.time()
-        if (now - self._last_pv_update) > 0.5:  # Update every 500ms
+        if (now - self._last_pv_update) > 1.0:  # Update every 500ms
             self.update_pv_graph()
             self._last_pv_update = now
     
