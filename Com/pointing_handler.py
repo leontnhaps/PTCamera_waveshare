@@ -36,7 +36,7 @@ class PointingHandlerMixin:
         
         # 세로: (cy - roi_size - 200) ~ (cy + roi_size)
         y1 = max(0, cy - roi_size - 200)  # 위로 200 확장
-        y2 = min(H, cy + roi_size)
+        y2 = min(H, cy)
         
         roi_on = img_on[y1:y2, x1:x2]
         roi_off = img_off[y1:y2, x1:x2]
@@ -210,7 +210,15 @@ class PointingHandlerMixin:
                 self._pointing_stable_cnt = 0
                 
                 # Move
-                d_pan, d_tilt = self._calculate_angle_delta(err_x, err_y)
+                # [MOD] 역산된 gain 사용 (없으면 기본값 사용됨)
+                k_p = getattr(self, '_computed_gain_pan', None)
+                k_t = getattr(self, '_computed_gain_tilt', None)
+                
+                kwargs = {}
+                if k_p is not None: kwargs['k_pan'] = k_p
+                if k_t is not None: kwargs['k_tilt'] = k_t
+                
+                d_pan, d_tilt = self._calculate_angle_delta(err_x, err_y, **kwargs)
                 
                 next_pan = self._curr_pan + d_pan
                 next_tilt = self._curr_tilt + d_tilt
@@ -384,6 +392,30 @@ class PointingHandlerMixin:
             # ---- 전역 저장 (센터링/보간에서 사용)
             self._fits_h = fits_h
             self._fits_v = fits_v
+
+            # ---- [NEW] 역산값 (Gain) 계산: 1 / mean_slope (px/deg)
+            # 가중 평균 slope 계산
+            sum_a_w = sum(d['a'] * d['N'] for d in fits_h.values())
+            sum_w_h = sum(d['N'] for d in fits_h.values())
+            avg_a = sum_a_w / sum_w_h if sum_w_h > 0 else 0.0
+
+            sum_e_w = sum(d['e'] * d['N'] for d in fits_v.values())
+            sum_w_v = sum(d['N'] for d in fits_v.values())
+            avg_e = sum_e_w / sum_w_v if sum_w_v > 0 else 0.0
+
+            # Slope(px/deg) 역수 -> deg/px
+            # 분모가 0이거나 너무 작으면 기본값 사용 등의 처리가 필요하겠지만 일단 계산
+            if abs(avg_a) > 1e-9:
+                self._computed_gain_pan = abs(1.0 / avg_a)
+            else:
+                self._computed_gain_pan = None
+
+            if abs(avg_e) > 1e-9:
+                self._computed_gain_tilt = abs(1.0 / avg_e)
+            else:
+                self._computed_gain_tilt = None
+
+            ui_q.put(("toast", f"[Gain 역산] P: {self._computed_gain_pan}, T: {self._computed_gain_tilt}"))
 
             # ---- (기존처럼) 가중평균 타깃 계산해서 UI에 표시
             def wavg_center(fits: dict, center_key: str):
