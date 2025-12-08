@@ -47,7 +47,7 @@ class PointingHandlerMixin:
         # Convert to grayscale
         gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
         
-        cv_thresh = 30
+        cv_thresh = 70
         _, binary = cv2.threshold(gray, cv_thresh, 255, cv2.THRESH_BINARY)
 
         # Calculate brightness centroid using moments
