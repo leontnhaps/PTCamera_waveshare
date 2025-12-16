@@ -8,7 +8,7 @@
 
 <video src="example.mp4" controls="controls" style="max-width: 100%;"></video>
 <br>
-<a href="example.mp4">👉 영상이 재생되지 않으면 여기를 클릭하세요 (Download/Watch)</a>
+example.mp4
 
 ---
 
