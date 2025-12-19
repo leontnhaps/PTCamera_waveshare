@@ -23,10 +23,17 @@ except ImportError:
 MODEL_PATH = "yolov11m_diff.pt"
 
 # 이미지 경로
-IMG_PREV_ON = r"C:\Users\gmlwn\OneDrive\바탕 화면\ICon1학년\OpticalWPT\추계 이후자료\Diff YOLO Test\captures_gui_20251201_004045\img_t-15_p-075_20251201_004206_138_led_on_ud.jpg"
-IMG_PREV_OFF = r"C:\Users\gmlwn\OneDrive\바탕 화면\ICon1학년\OpticalWPT\추계 이후자료\Diff YOLO Test\captures_gui_20251201_004045\img_t-15_p-075_20251201_004206_588_led_off_ud.jpg"
-IMG_CURR_ON = r"C:\Users\gmlwn\OneDrive\바탕 화면\ICon1학년\OpticalWPT\추계 이후자료\Diff YOLO Test\captures_gui_20251201_004045\img_t-15_p-090_20251201_004204_348_led_on_ud.jpg"
-IMG_CURR_OFF = r"C:\Users\gmlwn\OneDrive\바탕 화면\ICon1학년\OpticalWPT\추계 이후자료\Diff YOLO Test\captures_gui_20251201_004045\img_t-15_p-090_20251201_004204_803_led_off_ud.jpg"
+
+# IMG_PREV_ON = r"C:\Users\gmlwn\OneDrive\바탕 화면\ICon1학년\OpticalWPT\추계 이후자료\Diff YOLO Test\captures_gui_20251201_004045\img_t-15_p-075_20251201_004206_138_led_on_ud.jpg"
+# IMG_PREV_OFF = r"C:\Users\gmlwn\OneDrive\바탕 화면\ICon1학년\OpticalWPT\추계 이후자료\Diff YOLO Test\captures_gui_20251201_004045\img_t-15_p-075_20251201_004206_588_led_off_ud.jpg"
+# IMG_CURR_ON = r"C:\Users\gmlwn\OneDrive\바탕 화면\ICon1학년\OpticalWPT\추계 이후자료\Diff YOLO Test\captures_gui_20251201_004045\img_t-15_p-090_20251201_004204_348_led_on_ud.jpg"
+# IMG_CURR_OFF = rC:\Users\gmlwn\OneDrive\바탕 화면\ICon1학년\OpticalWPT\추계 이후자료\Diff YOLO Test\captures_gui_20251201_004045\img_t-15_p-090_20251201_004204_803_led_off_ud.jpg
+
+
+IMG_PREV_ON = r"C:\Users\gmlwn\OneDrive\바탕 화면\ICon1학년\OpticalWPT\추계 이후자료\Diff YOLO Dataset\젤먼거4\img_t+15_p-135_20251128_220759_113_led_on_ud.jpg"
+IMG_PREV_OFF = r"C:\Users\gmlwn\OneDrive\바탕 화면\ICon1학년\OpticalWPT\추계 이후자료\Diff YOLO Dataset\젤먼거4\img_t+15_p-135_20251128_220759_817_led_off_ud.jpg"
+IMG_CURR_ON = r"C:\Users\gmlwn\OneDrive\바탕 화면\ICon1학년\OpticalWPT\추계 이후자료\Diff YOLO Dataset\젤먼거4\img_t+15_p-150_20251128_220756_809_led_on_ud.jpg"
+IMG_CURR_OFF = r"C:\Users\gmlwn\OneDrive\바탕 화면\ICon1학년\OpticalWPT\추계 이후자료\Diff YOLO Dataset\젤먼거4\img_t+15_p-150_20251128_220757_770_led_off_ud.jpg"
 
 CONF_THRES = 0.50 
 IOU_THRES = 0.45
