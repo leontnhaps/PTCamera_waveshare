@@ -335,10 +335,13 @@ PTCamera_waveshare/
 **목표**: 시스템 시작 시 자동으로 전체 스캔을 시작하고, MOT를 통해 추적된 객체를 우선순위에 따라 자동으로 조준합니다.
 
 - [ ] **자동 스캔 시작**: GUI 실행 시 자동으로 전체 영역 스캔 개시
-- [ ] **MOT 기반 우선순위**: 마지막 조준 위치에서 가장 가까운 객체부터 순차 조준
+- [x] **MOT 기반 우선순위**: 마지막 조준 위치에서 가장 가까운 객체부터 순차 조준
+    - ✅ HSV+Grayscale 히스토그램 기반 코사인 유사도 매칭
+    - ✅ Skip-frame (n-2) 후보 검색으로 검출 놓침 대응
+    - ✅ 양방향 대각선 검색으로 지그재그 스캔 대응
 - [ ] **휴먼 피드백 제거**: 수동 개입 없이 전체 프로세스 자동화
 
-**현재 상태**: MOT는 코사인 유사도 기반으로 구현 완료. 자동 워크플로우 통합 중.
+**현재 상태**: MOT 알고리즘 완료 (`Experiments/mot_scan_hsv.py`). 자동 워크플로우 통합 중.
 
 ### 2. ✅ ~~YOLOv11n Nested Object Detection 개선~~ **(완료)**
 **문제**: 작은 객체가 큰 객체 내부에서 중복 탐지되는 현상 발생.
@@ -361,14 +364,14 @@ PTCamera_waveshare/
 
 **현재 상태**: 기본 LED 표시 기능 완료 (`Nano_LED.ino`).
 
-### 4. 📊 하드웨어 파라미터 튜닝
+### 4. ✅ ~~하드웨어 파라미터 튜닝~~ **(완료)**
 **목표**: 다양한 환경에서 최적의 성능을 위한 파라미터 최적화.
 
-**항목**:
-- [ ] LED settle time 최적화
-- [ ] Laser threshold 개선
-- [ ] Scan grid resolution 조정
-- [ ] Pointing feedback gain 미세 조정
+**완료 항목**:
+- [x] LED settle time 최적화
+- [x] Laser threshold 개선
+- [x] Scan grid resolution 조정
+- [x] Pointing feedback gain 미세 조정
 
 
 

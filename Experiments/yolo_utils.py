@@ -34,12 +34,71 @@ def non_max_suppression(boxes, scores, iou_threshold):
     return []
 
 
-def predict_with_tiling(model, img, rows=2, cols=3, overlap=0.15, conf=0.25, iou=0.45, device='cuda', use_full_image=True):
+def improved_nms(boxes, scores, iou_threshold=0.3, io_min_threshold=0.5):
+    """
+    IoU + IoMin 결합 NMS
+    - IoU: 일반적인 중복 제거
+    - IoMin: 작은 박스가 큰 박스에 포함된 경우 제거
+    
+    IoMin = Intersection / Min(Area1, Area2)
+    → 작은 박스가 큰 박스에 50% 이상 포함되면 제거
+    """
+    if len(boxes) == 0:
+        return []
+    
+    # 1. 먼저 일반 IoU 기반 NMS
+    indices = cv2.dnn.NMSBoxes(boxes, scores, score_threshold=0.0, nms_threshold=iou_threshold)
+    if len(indices) == 0:
+        return []
+    
+    indices = indices.flatten().tolist()
+    
+    # 2. IoMin으로 중첩된 박스 추가 제거
+    keep = []
+    for i in indices:
+        should_keep = True
+        box_i = boxes[i]
+        area_i = box_i[2] * box_i[3]
+        
+        for j in keep:
+            box_j = boxes[j]
+            area_j = box_j[2] * box_j[3]
+            
+            # Intersection 계산
+            x1_i, y1_i = box_i[0], box_i[1]
+            x2_i, y2_i = box_i[0] + box_i[2], box_i[1] + box_i[3]
+            x1_j, y1_j = box_j[0], box_j[1]
+            x2_j, y2_j = box_j[0] + box_j[2], box_j[1] + box_j[3]
+            
+            inter_x1 = max(x1_i, x1_j)
+            inter_y1 = max(y1_i, y1_j)
+            inter_x2 = min(x2_i, x2_j)
+            inter_y2 = min(y2_i, y2_j)
+            
+            if inter_x2 > inter_x1 and inter_y2 > inter_y1:
+                inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+                
+                # ⭐ IoMin = Intersection / Min(area_i, area_j)
+                io_min = inter_area / min(area_i, area_j)
+                
+                if io_min > io_min_threshold:  # 50% 이상 포함되면 제거
+                    should_keep = False
+                    break
+        
+        if should_keep:
+            keep.append(i)
+    
+    return keep
+
+
+def predict_with_tiling(model, img, rows=2, cols=3, overlap=0.15, conf=0.25, iou=0.45, device='cuda', use_full_image=True, nms_iou=0.3, nms_iomin=0.5):
     """
     이미지를 타일로 쪼개서 예측 후 결과 병합
     rows, cols: 행/열 개수 (2x3 = 6등분)
     overlap: 타일 간 겹치는 비율 (0.15 = 15%)
     use_full_image: 전체 이미지도 함께 검출 (큰 객체 검출용)
+    nms_iou: NMS IoU threshold (타일 병합 후)
+    nms_iomin: NMS IoMin threshold (중첩 박스 제거)
     
     배치 처리: 전체 이미지 + 타일 6개를 한 번에!
     """
@@ -179,7 +238,7 @@ def predict_with_tiling(model, img, rows=2, cols=3, overlap=0.15, conf=0.25, iou
     if not all_boxes:
         return [], [], []
 
-    indices = non_max_suppression(all_boxes, all_scores, iou_threshold=0.3)
+    indices = improved_nms(all_boxes, all_scores, iou_threshold=nms_iou, io_min_threshold=nms_iomin)
     
     final_boxes = []
     final_scores = []

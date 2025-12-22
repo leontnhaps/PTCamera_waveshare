@@ -30,6 +30,8 @@ IMG_CURR_OFF = r"C:\Users\gmlwn\OneDrive\바탕 화면\ICon1학년\OpticalWPT\�
 
 CONF_THRES = 0.50 
 IOU_THRES = 0.45
+# ⭐ 고정 ROI 크기 (중심 기준)
+ROI_SIZE = 200  # 200x200 픽셀
 
 # =========================================================
 # 핵심 로직 (특징 추출 & 유사도)
@@ -80,15 +82,16 @@ def process_step(model, img_on, img_off, step_name="Step"):
     PADDING_RATIO = 2.0 
     
     for i, (x, y, w, h) in enumerate(boxes):
-        # 1. 패딩 크기 계산 (너비/높이의 절반만큼 양쪽에 추가)
-        pad_w = int(w * PADDING_RATIO)
-        pad_h = int(h * PADDING_RATIO)
+        # ⭐ 객체 중심 계산
+        center_x = int(x + w / 2)
+        center_y = int(y + h / 2)
         
-        # 2. 좌표 확장 (이미지 밖으로 안 나가게 max/min 처리 필수!)
-        x1 = max(0, int(x - pad_w))
-        y1 = max(0, int(y - pad_h))
-        x2 = min(W, int(x + w + pad_w))
-        y2 = min(H, int(y + h + pad_h))
+        # ⭐ 중심 기준 고정 크기 ROI
+        half_size = ROI_SIZE // 2
+        x1 = max(0, center_x - half_size)
+        y1 = max(0, center_y - half_size)
+        x2 = min(W, center_x + half_size)
+        y2 = min(H, center_y + half_size)
         
         # 3. 넓어진 좌표로 ROI 추출 (LED ON 원본에서)
         roi = img_on[y1:y2, x1:x2]

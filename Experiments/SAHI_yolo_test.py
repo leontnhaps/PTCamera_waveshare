@@ -15,48 +15,125 @@ def non_max_suppression(boxes, scores, iou_threshold):
         return indices.flatten()
     return []
 
-def predict_with_tiling(model, img, rows=2, cols=3, overlap=0.15, conf=0.25, iou=0.45, device='cuda'):
+def improved_nms(boxes, scores, iou_threshold=0.3, io_min_threshold=0.5):
+    """
+    IoU + IoMin 결합 NMS
+    - IoU: 일반적인 중복 제거
+    - IoMin: 작은 박스가 큰 박스에 포함된 경우 제거
+    
+    IoMin = Intersection / Min(Area1, Area2)
+    → 작은 박스가 큰 박스에 50% 이상 포함되면 제거
+    """
+    if len(boxes) == 0:
+        return []
+    
+    # 1. 먼저 일반 IoU 기반 NMS
+    indices = cv2.dnn.NMSBoxes(boxes, scores, score_threshold=0.0, nms_threshold=iou_threshold)
+    if len(indices) == 0:
+        return []
+    
+    indices = indices.flatten().tolist()
+    
+    # 2. IoMin으로 중첩된 박스 추가 제거
+    keep = []
+    for i in indices:
+        should_keep = True
+        box_i = boxes[i]
+        area_i = box_i[2] * box_i[3]
+        
+        for j in keep:
+            box_j = boxes[j]
+            area_j = box_j[2] * box_j[3]
+            
+            # Intersection 계산
+            x1_i, y1_i = box_i[0], box_i[1]
+            x2_i, y2_i = box_i[0] + box_i[2], box_i[1] + box_i[3]
+            x1_j, y1_j = box_j[0], box_j[1]
+            x2_j, y2_j = box_j[0] + box_j[2], box_j[1] + box_j[3]
+            
+            inter_x1 = max(x1_i, x1_j)
+            inter_y1 = max(y1_i, y1_j)
+            inter_x2 = min(x2_i, x2_j)
+            inter_y2 = min(y2_i, y2_j)
+            
+            if inter_x2 > inter_x1 and inter_y2 > inter_y1:
+                inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+                
+                # ⭐ IoMin = Intersection / Min(area_i, area_j)
+                io_min = inter_area / min(area_i, area_j)
+                
+                if io_min > io_min_threshold:  # 50% 이상 포함되면 제거
+                    should_keep = False
+                    break
+        
+        if should_keep:
+            keep.append(i)
+    
+    return keep
+
+def predict_with_tiling(model, img, rows=2, cols=3, overlap=0.15, conf=0.25, iou=0.45, device='cuda', use_full_image=True, nms_iou=0.3, nms_iomin=0.5):
     """
     이미지를 타일로 쪼개서 예측 후 결과 병합
     rows, cols: 행/열 개수 (2x3 = 6등분)
     overlap: 타일 간 겹치는 비율 (0.15 = 15%)
+    use_full_image: 전체 이미지도 함께 검출 (큰 객체 검출용)
+    nms_iou: NMS IoU threshold (타일 병합 후)
+    nms_iomin: NMS IoMin threshold (중첩 박스 제거)
     """
     H, W = img.shape[:2]
     
-    # 타일 크기 계산 (겹침 포함)
-    tile_h = int(H / rows)
-    tile_w = int(W / cols)
-    
-    # 겹침 크기
-    ov_h = int(tile_h * overlap)
-    ov_w = int(tile_w * overlap)
-    
-    # 실제 타일 크기 (겹침 포함)
-    step_h = tile_h - ov_h
-    step_w = tile_w - ov_w
-    
-    # 타일 좌표 생성
+    # ⭐ yolo_utils.py와 동일한 타일 생성 방식
+    # 타일 좌표 생성 (정확히 rows x cols 개수)
     tiles = []
-    for y in range(0, H, step_h):
-        for x in range(0, W, step_w):
-            # 타일 영역 계산
-            y2 = min(y + tile_h, H)
-            x2 = min(x + tile_w, W)
-            # 마지막 타일 크기 조정
-            y1 = max(0, y2 - tile_h)
-            x1 = max(0, x2 - tile_w)
-            tiles.append((x1, y1, x2, y2))
+    base_tile_h = H // rows
+    base_tile_w = W // cols
+    
+    # 오버랩 크기 계산
+    ov_h = int(base_tile_h * overlap)
+    ov_w = int(base_tile_w * overlap)
+    
+    for row_idx in range(rows):
+        for col_idx in range(cols):
+            # 기본 타일 영역
+            y1 = row_idx * base_tile_h
+            y2 = (row_idx + 1) * base_tile_h if row_idx < rows - 1 else H
+            x1 = col_idx * base_tile_w
+            x2 = (col_idx + 1) * base_tile_w if col_idx < cols - 1 else W
             
-            if x2 >= W: break
-        if y2 >= H: break
+            # 오버랩 확장 (경계 체크)
+            y1 = max(0, y1 - ov_h)
+            y2 = min(H, y2 + ov_h)
+            x1 = max(0, x1 - ov_w)
+            x2 = min(W, x2 + ov_w)
+            
+            tiles.append((x1, y1, x2, y2))
 
     # 모든 타일 추론
     all_boxes = []   # [x, y, w, h]
     all_scores = []
     all_classes = []
     
-    print(f"  -> {len(tiles)}개 타일로 분할 분석 중...", end="", flush=True)
+    total_images = len(tiles) + (1 if use_full_image else 0)
+    print(f"  -> {total_images}개 이미지 분석 중 (전체 이미지: {use_full_image}, 타일: {len(tiles)}개)...", end="", flush=True)
     
+    # ⭐ 1. 전체 이미지 검출 (옵션)
+    if use_full_image:
+        results = model.predict(img, conf=conf, iou=iou, device=device, verbose=False)[0]
+        if results.boxes:
+            for box in results.boxes:
+                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                c = float(box.conf.cpu().numpy().item())
+                cls = int(box.cls.cpu().numpy().item())
+                
+                w = x2 - x1
+                h = y2 - y1
+                
+                all_boxes.append([int(x1), int(y1), int(w), int(h)])
+                all_scores.append(c)
+                all_classes.append(cls)
+        print("F", end="", flush=True)  # Full image 완료
+    
+    # ⭐ 2. 타일 검출
     for i, (tx1, ty1, tx2, ty2) in enumerate(tiles):
         # 타일 잘라내기
         tile_img = img[ty1:ty2, tx1:tx2]
@@ -87,11 +164,12 @@ def predict_with_tiling(model, img, rows=2, cols=3, overlap=0.15, conf=0.25, iou
         print(".", end="", flush=True)
     print(" 완료")
 
-    # 전체 결과에 대해 NMS 수행 (중복 박스 제거)
+    # ⭐ 3. IoU + IoMin NMS 수행 (중복 박스 + 중첩 박스 제거)
+    print(f"  -> NMS 전: {len(all_boxes)}개 박스", end="", flush=True)
     if not all_boxes:
         return [], [], []
 
-    indices = non_max_suppression(all_boxes, all_scores, iou_threshold=0.3) # 겹침 제거 강하게
+    indices = improved_nms(all_boxes, all_scores, iou_threshold=nms_iou, io_min_threshold=nms_iomin)
     
     final_boxes = []
     final_scores = []
@@ -101,7 +179,8 @@ def predict_with_tiling(model, img, rows=2, cols=3, overlap=0.15, conf=0.25, iou
         final_boxes.append(all_boxes[idx])
         final_scores.append(all_scores[idx])
         final_classes.append(all_classes[idx])
-        
+    
+    print(f" -> NMS 후: {len(final_boxes)}개 박스")
     return final_boxes, final_scores, final_classes
 
 def draw_results(img, boxes, scores, classes):
@@ -180,16 +259,20 @@ def run_yolo_on_folder():
             if img is None: continue
 
             # ★ 타일링 추론 실행 ★
+            # ⭐ MOT와 동일한 설정
             # rows=2, cols=3 -> 6등분
-            # overlap=0.15 -> 15% 겹치게 잘라서 경계선 객체 보호
-            # conf=0.20 -> 신뢰도 낮춰서 작은 것도 잡기
+            # overlap=0.15 -> 15% (MOT와 동일)
+            # conf=0.50 -> MOT CONF_THRES와 동일
+            # iou=0.2 -> MOT IOU_THRES와 동일
+            # use_full_image=True -> 전체 이미지도 함께 검출 (7개 이미지)
             boxes, scores, classes = predict_with_tiling(
                 model, img, 
                 rows=2, cols=3, 
-                overlap=0.25, 
-                conf=0.20, 
-                iou=0.45, 
-                device=device
+                overlap=0.15,  # ⭐ MOT와 동일
+                conf=0.50,     # ⭐ MOT와 동일
+                iou=0.2,       # ⭐ MOT와 동일
+                device=device,
+                use_full_image=True
             )
 
             # 결과 그리기

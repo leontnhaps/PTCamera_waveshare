@@ -1,4 +1,4 @@
-"""
+﻿"""
 MOT Scan Simulation Test
 기존 스캔 이미지 폴더로 전체 추적 알고리즘 테스트
 """
@@ -28,27 +28,33 @@ except ImportError:
 # =========================================================
 MODEL_PATH = "yolov11m_diff.pt"
 
-# ⭐ 여기에 스캔 폴더 경로 입력! (예시)
-SCAN_FOLDER = r"C:\Users\gmlwn\OneDrive\바탕 화면\ICon1학년\OpticalWPT\추계 이후자료\Diff YOLO Dataset\젤먼거10"
+# ⭐ 스캔 폴더 베이스 경로
+BASE_FOLDER = r"C:\Users\gmlwn\OneDrive\바탕 화면\ICon1학년\OpticalWPT\추계 이후자료\Diff YOLO Dataset"
+# 처리할 폴더 목록
+# FOLDER_NAMES = ["젤먼거", "젤먼거2", "젤먼거3", "젤먼거4", "젤먼거5", 
+#                 "젤먼거6", "젤먼거7", "젤먼거8", "젤먼거9", "젤먼거10"]
+FOLDER_NAMES = ["젤먼거"]
 
 CONF_THRES = 0.50
-IOU_THRES = 0.45
+IOU_THRES = 0.2
 # ⭐ 고정 ROI 크기 (중심 기준)
-ROI_SIZE = 200  # 200x200 픽셀
+ROI_SIZE = 300  # 200x200 픽셀
 
 # =========================================================
-# 특징 추출 (Grayscale)
+# 특징 추출 (HSV + Grayscale 결합)
 # =========================================================
-def get_feature_vector(roi_bgr, grid_size=(5, 5)):
+def get_feature_vector(roi_bgr, diff_roi=None, grid_size=(11, 11)):
     """
     격자 기반 히스토그램 추출: 공간적 위치 정보를 포함함
+    ⭐ HSV + Grayscale 히스토그램 결합 (Diff 마스크 적용)
     grid_size: (rows, cols) - ROI를 나눌 구역 수
     """
     if roi_bgr is None or roi_bgr.size == 0:
         return None
     
+    hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
     gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
-    h, w = gray.shape
+    h, w = hsv.shape[:2]
     rows, cols = grid_size
     
     feature_vector = []
@@ -63,15 +69,44 @@ def get_feature_vector(roi_bgr, grid_size=(5, 5)):
             x_end = int(((c + 1) / cols) * w)
             
             # 구역(Cell) 추출
-            cell = gray[y_start:y_end, x_start:x_end]
+            cell_hsv = hsv[y_start:y_end, x_start:x_end]
+            cell_gray = gray[y_start:y_end, x_start:x_end]
             
-            # 구역 내 히스토그램 (해당 위치의 색상 분포)
-            mask = cv2.inRange(cell, 30, 255)
-            hist = cv2.calcHist([cell], [0], mask, [64], [0, 256])
+            # ⭐ Diff 기반 마스크 생성
+            if diff_roi is not None:
+                # Diff cell 추출
+                diff_cell = diff_roi[y_start:y_end, x_start:x_end]
+                # Grayscale로 변환
+                if len(diff_cell.shape) == 3:
+                    diff_gray = cv2.cvtColor(diff_cell, cv2.COLOR_BGR2GRAY)
+                else:
+                    diff_gray = diff_cell
+                
+                # ⭐ Diff < 20인 부분만 (배경 부분, 객체 필름 제외!)
+                # Diff가 작은 부분 = 변화 없는 배경 → 사용
+                # Diff가 큰 부분 = LED 변화 객체(필름) → 제외
+                diff_mask = (diff_gray < 20).astype(np.uint8) * 255
+                
+                # V > 30 조건과 결합
+                v_mask = cv2.inRange(cell_hsv, (0, 0, 30), (180, 255, 255))
+                mask = cv2.bitwise_and(diff_mask, v_mask)
+            else:
+                # Diff가 없으면 기본 마스크만
+                mask = cv2.inRange(cell_hsv, (0, 0, 30), (180, 255, 255))
             
-            # 각 구역별 정규화 후 리스트에 추가
-            cv2.normalize(hist, hist, 0, 1, cv2.NORM_MINMAX)
-            feature_vector.append(hist.flatten())
+            # ⭐ 1. HSV 히스토그램 (Hue + Saturation)
+            # Hue: 8 bins, Saturation: 4 bins → 32차원
+            hist_hsv = cv2.calcHist([cell_hsv], [0, 1], mask, [8, 4], [0, 180, 0, 256])
+            cv2.normalize(hist_hsv, hist_hsv, 0, 1, cv2.NORM_MINMAX)
+            
+            # ⭐ 2. Grayscale 히스토그램
+            # 16 bins → 16차원
+            hist_gray = cv2.calcHist([cell_gray], [0], mask, [16], [0, 256])
+            cv2.normalize(hist_gray, hist_gray, 0, 1, cv2.NORM_MINMAX)
+            
+            # ⭐ 3. 두 히스토그램 결합 (32 + 16 = 48차원)
+            combined_hist = np.concatenate([hist_hsv.flatten(), hist_gray.flatten()])
+            feature_vector.append(combined_hist)
     
     # 모든 구역의 히스토그램을 하나로 결합 (공간 정보가 순서대로 쌓임)
     final_vector = np.concatenate(feature_vector)
@@ -80,6 +115,7 @@ def get_feature_vector(roi_bgr, grid_size=(5, 5)):
     final_vector = final_vector / (norm(final_vector) + 1e-7)
     
     return final_vector
+
 
 def calc_cosine_similarity(vec_a, vec_b):
     """코사인 유사도"""
@@ -189,11 +225,12 @@ class ObjectTracker:
         self.similarity_log = []
         self.unique_id_counter = 1
         
-    def add_detections(self, boxes, scores, img_on, pan, tilt, timestamp):
+    def add_detections(self, boxes, scores, img_on, diff, pan, tilt, timestamp):
         """
         타임스탬프 기반 순차 추적:
         1. 직전 프레임 (threshold=0.3)
         2. 프레임 건너뛰기 (threshold=0.4) - 검출 놓침 대비
+        ⭐ diff 이미지를 받아서 필름 배경 필터링
         """
         # 현재 프레임 특징 추출
         curr_objects = []
@@ -212,10 +249,13 @@ class ObjectTracker:
             y2 = min(H, center_y + half_size)
             
             roi = img_on[y1:y2, x1:x2]
+            diff_roi = diff[y1:y2, x1:x2]  # ⭐ Diff ROI도 추출
+            
             if roi.size == 0:
                 continue
                 
-            vec = get_feature_vector(roi)
+            # ⭐ diff_roi 전달하여 필름 필터링
+            vec = get_feature_vector(roi, diff_roi=diff_roi)
             
             # ⭐ 고유 ID 생성
             curr_objects.append({
@@ -278,7 +318,7 @@ class ObjectTracker:
             if obj_idx in used_objects or candidate['track_id'] in used_track_ids:
                 continue
             
-            if sim > 0.4:  # 건너뛰기 후보 threshold (더 엄격)
+            if sim > 0.35:  # 건너뛰기 후보 threshold (더 엄격)
                 obj_assignments[obj_idx] = (candidate['track_id'], sim, candidate, source)
                 used_objects.add(obj_idx)
                 used_track_ids.add(candidate['track_id'])
@@ -603,50 +643,38 @@ def parse_scan_images(scan_folder):
 # =========================================================
 # 메인 실행
 # =========================================================
-def main():
-    if not os.path.exists(MODEL_PATH):
-        print("❌ 모델 파일 없음")
-        return
-    
+def process_folder(scan_folder, output_suffix=""):
+    """단일 폴더 처리"""
     model = YOLO(MODEL_PATH)
     tracker = ObjectTracker()
     tracker.reset()
     
     # 스캔 이미지 로드
-    print(f"\n📂 스캔 폴더: {SCAN_FOLDER}")
-    images = parse_scan_images(SCAN_FOLDER)
+    print(f"\n📂 스캔 폴더: {scan_folder}")
+    images = parse_scan_images(scan_folder)
     print(f"✅ 총 {len(images)}개 이미지 발견")
     
-    # 🐛 디버깅: 파싱된 이미지 몇 개 출력
-    if images:
-        print(f"\n🔍 첫 5개 파싱 결과:")
-        for i, (pan, tilt, led_type, filepath, timestamp) in enumerate(images[:5]):
-            filename = Path(filepath).name
-            print(f"  {i+1}. Pan={pan:+4d}, Tilt={tilt:+3d}, {led_type:7s}, ts={timestamp}, {filename}")
-    else:
+    if not images:
         print("⚠️ 파싱된 이미지가 없습니다!")
         return
     
-    # ON/OFF 쌍 만들기 (⭐ timestamp는 키에 포함 안함, ON/OFF가 다른 timestamp를 가짐)
+    # ON/OFF 쌍 만들기
     pairs = {}
     for pan, tilt, led_type, filepath, timestamp in images:
-        key = (pan, tilt)  # ⭐ Pan/Tilt만 사용
+        key = (pan, tilt)
         if key not in pairs:
             pairs[key] = {}
         pairs[key][led_type] = {'path': filepath, 'timestamp': timestamp}
     
-    # 🐛 디버깅: 쌍 정보 출력
-    print(f"\n🔍 ON/OFF 쌍: {len(pairs)}개")
+    print(f"🔍 ON/OFF 쌍: {len(pairs)}개")
     complete_pairs = [k for k, v in pairs.items() if 'on' in v and 'off' in v]
     print(f"   완전한 쌍 (ON+OFF): {len(complete_pairs)}개")
+    
     if not complete_pairs:
         print("⚠️ ON/OFF 쌍이 하나도 없습니다!")
-        print("🔍 첫 5개 쌍 상태:")
-        for i, (key, val) in enumerate(list(pairs.items())[:5]):
-            print(f"  {i+1}. {key} → {list(val.keys())}")
         return
     
-    # ⭐ ON 이미지의 타임스탬프 기준으로 정렬 (실제 촬영 순서)
+    # ⭐ ON 이미지의 타임스탬프 기준으로 정렬
     sorted_keys = sorted(complete_pairs, key=lambda x: pairs[x]['on']['timestamp'])
     
     print("="*60)
@@ -657,8 +685,6 @@ def main():
     
     for pan, tilt in sorted_keys:
         pair = pairs[(pan, tilt)]
-        
-        # ON 이미지의 타임스탬프 사용
         timestamp = pair['on']['timestamp']
         
         # 이미지 로드
@@ -681,8 +707,8 @@ def main():
             print(f"[Pan={pan:+4d}, Tilt={tilt:+3d}] 검출 없음")
             continue
         
-        # ⭐ 추적 (timestamp 전달)
-        track_ids = tracker.add_detections(boxes, scores, img_on, pan, tilt, timestamp)
+        # ⭐ 추적
+        track_ids = tracker.add_detections(boxes, scores, img_on, diff, pan, tilt, timestamp)
         
         # 결과 출력
         print(f"[Pan={pan:+4d}, Tilt={tilt:+3d}] {len(boxes)}개 검출 → track_ids: {track_ids}")
@@ -694,15 +720,61 @@ def main():
     print(f"부여된 고유 ID: 0 ~ {tracker.next_id - 1} ({tracker.next_id}개)")
     print("="*60)
     
-    # ⭐ 유사도 로그 저장
-    print("\n💾 유사도 로그 저장 중...")
-    tracker.save_similarity_log("./mot_output/similarity_log.txt")
-    print("✅ 유사도 로그 저장 완료! → ./mot_output/similarity_log.txt")
+    # ⭐ 출력 폴더 설정
+    output_folder = f"./mot_output{output_suffix}"
+    
+    # 유사도 로그 저장
+    print(f"\n💾 유사도 로그 저장 중... → {output_folder}")
+    tracker.save_similarity_log(f"{output_folder}/similarity_log.txt")
+    print(f"✅ 유사도 로그 저장 완료!")
     
     # 시각화 저장
-    print("\n💾 Track ID별 이미지 저장 중...")
-    save_tracked_objects(tracker, output_folder="./mot_output")
-    print("✅ 저장 완료! → ./mot_output/ 폴더 확인")
+    print(f"💾 Track ID별 이미지 저장 중...")
+    save_tracked_objects(tracker, output_folder=output_folder)
+    print(f"✅ 저장 완료! → {output_folder}/ 폴더 확인")
+
+
+def main():
+    if not os.path.exists(MODEL_PATH):
+        print("❌ 모델 파일 없음")
+        return
+    
+    print("="*60)
+    print(f"🎯 총 {len(FOLDER_NAMES)}개 폴더 처리 시작")
+    print("="*60)
+    
+    for idx, folder_name in enumerate(FOLDER_NAMES, 1):
+        scan_folder = os.path.join(BASE_FOLDER, folder_name)
+        
+        # 폴더 존재 확인
+        if not os.path.exists(scan_folder):
+            print(f"\n⚠️ [{idx}/{len(FOLDER_NAMES)}] {folder_name}: 폴더 없음, 건너뜀")
+            continue
+        
+        print(f"\n{'='*60}")
+        print(f"📁 [{idx}/{len(FOLDER_NAMES)}] {folder_name} 처리 중...")
+        print(f"{'='*60}")
+        
+        # 출력 폴더 suffix (젤먼거 → "", 젤먼거2 → "_2", ...)
+        if folder_name == "젤먼거":
+            output_suffix = ""
+        else:
+            # "젤먼거2" → "_2"
+            suffix_num = folder_name.replace("젤먼거", "")
+            output_suffix = f"_{suffix_num}" if suffix_num else ""
+        
+        try:
+            process_folder(scan_folder, output_suffix)
+        except Exception as e:
+            print(f"\n❌ {folder_name} 처리 실패: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+    
+    print("\n" + "="*60)
+    print("🎉 전체 폴더 처리 완료!")
+    print("="*60)
 
 if __name__ == "__main__":
     main()
+

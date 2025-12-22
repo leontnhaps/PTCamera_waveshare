@@ -30,13 +30,14 @@ MODEL_PATH = "yolov11m_diff.pt"
 # IMG_CURR_OFF = rC:\Users\gmlwn\OneDrive\바탕 화면\ICon1학년\OpticalWPT\추계 이후자료\Diff YOLO Test\captures_gui_20251201_004045\img_t-15_p-090_20251201_004204_803_led_off_ud.jpg
 
 
-IMG_PREV_ON = r"C:\Users\gmlwn\OneDrive\바탕 화면\ICon1학년\OpticalWPT\추계 이후자료\Diff YOLO Dataset\젤먼거4\img_t+15_p-135_20251128_220759_113_led_on_ud.jpg"
-IMG_PREV_OFF = r"C:\Users\gmlwn\OneDrive\바탕 화면\ICon1학년\OpticalWPT\추계 이후자료\Diff YOLO Dataset\젤먼거4\img_t+15_p-135_20251128_220759_817_led_off_ud.jpg"
-IMG_CURR_ON = r"C:\Users\gmlwn\OneDrive\바탕 화면\ICon1학년\OpticalWPT\추계 이후자료\Diff YOLO Dataset\젤먼거4\img_t+15_p-150_20251128_220756_809_led_on_ud.jpg"
-IMG_CURR_OFF = r"C:\Users\gmlwn\OneDrive\바탕 화면\ICon1학년\OpticalWPT\추계 이후자료\Diff YOLO Dataset\젤먼거4\img_t+15_p-150_20251128_220757_770_led_off_ud.jpg"
-
+IMG_PREV_ON = r"C:\Users\gmlwn\OneDrive\바탕 화면\ICon1학년\OpticalWPT\추계 이후자료\Diff YOLO Dataset\젤먼거5\img_t-15_p-180_20251128_221038_723_led_on_ud.jpg"
+IMG_PREV_OFF = r"C:\Users\gmlwn\OneDrive\바탕 화면\ICon1학년\OpticalWPT\추계 이후자료\Diff YOLO Dataset\젤먼거5\img_t-15_p-180_20251128_221039_788_led_off_ud.jpg"
+IMG_CURR_ON = r"C:\Users\gmlwn\OneDrive\바탕 화면\ICon1학년\OpticalWPT\추계 이후자료\Diff YOLO Dataset\젤먼거5\img_t-15_p-165_20251128_221041_129_led_on_ud.jpg"
+IMG_CURR_OFF = r"C:\Users\gmlwn\OneDrive\바탕 화면\ICon1학년\OpticalWPT\추계 이후자료\Diff YOLO Dataset\젤먼거5\img_t-15_p-165_20251128_221041_833_led_off_ud.jpg"
 CONF_THRES = 0.50 
 IOU_THRES = 0.45
+# ⭐ 고정 ROI 크기 (중심 기준)
+ROI_SIZE = 200  # 200x200 픽셀
 
 # =========================================================
 # 핵심 로직 (특징 추출 & 유사도) - GRAYSCALE 버전
@@ -59,7 +60,7 @@ def get_feature_vector(roi_bgr):
     
     # 3. 히스토그램 계산 (1D, 32 bins)
     # 0~255 밝기 범위를 32개 구간으로 나눔
-    hist = cv2.calcHist([gray], [0], mask, [32], [0, 256])
+    hist = cv2.calcHist([gray], [0], mask, [16], [0, 256])
     
     # 4. 정규화 & 벡터화
     cv2.normalize(hist, hist, 0, 1, cv2.NORM_MINMAX)
@@ -90,15 +91,16 @@ def process_step(model, img_on, img_off, step_name="Step"):
     PADDING_RATIO = 2.0 
     
     for i, (x, y, w, h) in enumerate(boxes):
-        # 1. 패딩 크기 계산
-        pad_w = int(w * PADDING_RATIO)
-        pad_h = int(h * PADDING_RATIO)
+        # ⭐ 객체 중심 계산
+        center_x = int(x + w / 2)
+        center_y = int(y + h / 2)
         
-        # 2. 좌표 확장
-        x1 = max(0, int(x - pad_w))
-        y1 = max(0, int(y - pad_h))
-        x2 = min(W, int(x + w + pad_w))
-        y2 = min(H, int(y + h + pad_h))
+        # ⭐ 중심 기준 고정 크기 ROI
+        half_size = ROI_SIZE // 2
+        x1 = max(0, center_x - half_size)
+        y1 = max(0, center_y - half_size)
+        x2 = min(W, center_x + half_size)
+        y2 = min(H, center_y + half_size)
         
         # 3. ROI 추출 (LED ON 원본에서)
         roi = img_on[y1:y2, x1:x2]
