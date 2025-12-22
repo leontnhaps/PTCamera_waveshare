@@ -309,17 +309,17 @@ PTCamera_waveshare/
 
 **현재 상태**: MOT는 코사인 유사도 기반으로 구현 완료. 자동 워크플로우 통합 중.
 
-### 2. 🔧 YOLOv11n Nested Object Detection 개선
+### 2. ✅ ~~YOLOv11n Nested Object Detection 개선~~ **(완료)**
 **문제**: 작은 객체가 큰 객체 내부에서 중복 탐지되는 현상 발생.
 
-**해결 방안**:
-- [ ] **Option 1 - NMS Threshold 조정**: IoU threshold를 낮춰 중복 박스 제거 강화
-    - ⚠️ **위험**: 인접한 객체가 많을 경우 유효한 탐지가 제거될 수 있음
-- [ ] **Option 2 - 코드 레벨 필터링** (추천):
-    - 탐지 후 IoU가 높은 내부 박스를 자동으로 제거하는 후처리 로직 추가
-    - Nested box 판별: `IoU(box_small, box_large) > threshold → remove box_small`
+**해결 완료**:
+- [x] **IoMin 기반 NMS 구현** (Option 2 선택):
+    - 표준 IoU 기반 NMS에 더해 IoMin(Intersection over Minimum Area) 방식 추가
+    - `IoMin = Intersection / Min(Area1, Area2)` 계산
+    - 2단계 NMS: IoU threshold 0.3 → IoMin threshold 0.5
+    - 작은 박스가 큰 박스에 50% 이상 포함 시 자동 제거
 
-**현재 상태**: 문제 확인 완료, Option 2로 개발 예정.
+**구현 위치**: `Com/yolo_utils.py` 및 `Experiments/yolo_utils.py`의 `improved_nms()` 함수
 
 ### 3. 🔋 배터리 인식 상태 확인
 **목표**: 수신부 배터리 상태를 원격에서도 확인할 수 있도록 개선.
