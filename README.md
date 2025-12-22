@@ -206,6 +206,10 @@ flowchart TD
 *   **`yolo_utils.py` (AI Wrapper)**
     *   `ultralytics` 라이브러리를 래핑하여 YOLO 모델을 쉽게 사용할 수 있게 합니다.
     *   큰 이미지에서 작은 타겟을 놓치지 않기 위해 이미지를 분할하여 추론하는 **Tiling** 기법이 구현되어 있습니다.
+    *   **IoMin 기반 NMS (Non-Maximum Suppression)**: 표준 IoU 기반 NMS에 더해, IoMin(Intersection over Minimum Area) 방식을 추가로 적용하여 중첩된 박스를 효과적으로 제거합니다.
+        - **문제**: 작은 박스가 큰 박스 안에 완전히 포함될 경우, 표준 IoU 값이 매우 낮아(예: 9%) NMS로 걸러지지 않습니다.
+        - **해결**: `IoMin = Intersection / Min(Area1, Area2)` 계산을 통해, 작은 박스가 큰 박스에 50% 이상 포함되면 제거합니다.
+        - **구현**: 2단계 NMS (1단계: IoU threshold=0.3, 2단계: IoMin threshold=0.5)
 
 *   **`network.py` (Network Client)**
     *   서버와 통신하기 위한 소켓 클라이언트 클래스(`GuiCtrlClient`, `GuiImgClient`)가 정의되어 있습니다.
