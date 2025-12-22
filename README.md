@@ -282,9 +282,40 @@ PTCamera_waveshare/
 │   └── INA219/             # (레거시) INA219 전압센서 코드
 │
 ├── Experiments/            # 실험 및 테스트 스크립트
-│   ├── mot_scan_test.py    # MOT 스캔 테스트
-│   ├── mot_gray_test.py    # Grayscale 기반 MOT 테스트
-│   └── (기타 실험 파일들)
+│   ├── yolo_utils.py       # YOLO 래핑 (IoMin NMS 포함)
+│   │
+│   ├── # MOT (Multi-Object Tracking) 테스트
+│   ├── mot_scan_hsv.py     # ✅ 최종 검증 완료 - HSV+Grayscale 기반 MOT
+│   │                       # - Skip-frame (n-2) 후보 검색
+│   │                       # - 양방향 대각선 검색 (지그재그 스캔 대응)
+│   │                       # - 2단계 매칭 (threshold 0.3 / 0.35)
+│   ├── mot_scan_test.py    # Grayscale 히스토그램 기반 MOT 테스트
+│   ├── mot_gray_test.py    # Grayscale 단독 특징 추출 테스트
+│   ├── mot_cosin_test.py   # 코사인 유사도 기반 MOT 초기 테스트
+│   │
+│   ├── # YOLO 추론 테스트
+│   ├── SAHI_yolo_test.py   # Tiling 전략 검증 및 IoMin NMS 테스트
+│   ├── yolo_test.py        # YOLO 기본 추론 테스트
+│   ├── sahi_tiling_visualizer.py  # 타일링 시각화 도구
+│   │
+│   ├── # Diff 이미지 필터링 실험
+│   ├── diff_filter_hsv.py  # HSV 색공간 필터링
+│   ├── diff_filter_rgb.py  # RGB 색공간 필터링
+│   ├── diff_filter_red.py  # 빨간색 채널 강조
+│   ├── diff_filter_yellow.py  # 노란색 채널 강조
+│   ├── diff_filter_red_yellow.py  # 빨강+노랑 복합
+│   ├── diff_filter_1_2.py  # 비율 필터링 (1:2)
+│   │
+│   ├── # 레이저 감지 실험
+│   ├── diff_laser.py       # Diff 기반 레이저 중심 감지
+│   ├── diff_laser_hsv.py   # HSV + Diff 레이저 감지
+│   ├── Laser_GPIO.py       # 라즈베리파이 레이저 GPIO 제어
+│   │
+│   ├── # 유틸리티
+│   ├── generate_diff_dataset.py  # Diff 학습 데이터셋 생성
+│   ├── view_diff.py        # Diff 이미지 시각화
+│   ├── rate_image.py       # 이미지 품질 평가
+│   └── undistort_gui.py    # 왜곡 보정 GUI 도구
 │
 ├── Docs/                   # 문서
 ├── calib.npz               # 카메라 보정 파일
