@@ -398,8 +398,8 @@ class ObjectTracker:
                     'frame_timestamp': prev_tilt_frame['timestamp']
                 })
         
-        # 기본 대각선 fallback (둘 다 없을 때만)
-        if prev_pan_frame is None and prev_tilt_frame is None and prev_diagonal_frame is not None:
+        # ⭐ 대각선 (조건 없이 항상 추가)
+        if prev_diagonal_frame is not None:
             for obj in prev_diagonal_frame['objects']:
                 direct_candidates.append({
                     **obj,

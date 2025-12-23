@@ -173,6 +173,25 @@ class AppUIMixin:
         ttk.Button(point_csv_frame, text="Load CSV", command=self.pointing_choose_csv).pack(anchor="w", padx=5, pady=2)
         ttk.Button(point_csv_frame, text="Move to Target", command=self.pointing_move).pack(anchor="w", padx=5, pady=5)
         
+        # 4. Tracked Objects (동적 버튼)
+        point_objects_frame = ttk.LabelFrame(self.point_scroll_frame, text="🎯 Tracked Objects")
+        point_objects_frame.grid(row=1, column=0, columnspan=3, padx=5, pady=10, sticky="nsew")
+        
+        # 스크롤 가능한 버튼 컨테이너
+        self.track_buttons_canvas = tk.Canvas(point_objects_frame, height=150)
+        self.track_buttons_scroll = ttk.Scrollbar(point_objects_frame, orient="vertical", command=self.track_buttons_canvas.yview)
+        self.track_buttons_frame = ttk.Frame(self.track_buttons_canvas)
+        
+        self.track_buttons_frame.bind("<Configure>", lambda e: self.track_buttons_canvas.configure(scrollregion=self.track_buttons_canvas.bbox("all")))
+        self.track_buttons_canvas.create_window((0, 0), window=self.track_buttons_frame, anchor="nw")
+        self.track_buttons_canvas.configure(yscrollcommand=self.track_buttons_scroll.set)
+        
+        self.track_buttons_canvas.pack(side="left", fill="both", expand=True, padx=5, pady=5)
+        self.track_buttons_scroll.pack(side="right", fill="y")
+        
+        # 초기 메시지
+        ttk.Label(self.track_buttons_frame, text="(스캔 완료 후 자동으로 표시됩니다)", foreground="gray").pack(pady=20)
+        
         # Debug Preview
         debug_frame = Frame(self.tab_point, bg="#111", width=420, height=420, relief="solid", borderwidth=2)
         debug_frame.pack(side="right", padx=10, pady=10)
@@ -185,6 +204,46 @@ class AppUIMixin:
     # _setup_pv_tab() 메서드 및 모든 관련 코드 제거됨
     
     # Helper methods for UI creation
+    def _create_target_buttons(self, computed_targets):
+        """
+        track_id별 "Move to Target" 버튼 동적 생성
+        
+        Args:
+            computed_targets: {track_id: (pan, tilt), ...}
+        """
+        if not hasattr(self, 'track_buttons_frame'):
+            print("[UI] track_buttons_frame not ready yet")
+            return
+        
+        # 기존 버튼 모두 제거
+        for widget in self.track_buttons_frame.winfo_children():
+            widget.destroy()
+        
+        if not computed_targets:
+            ttk.Label(self.track_buttons_frame, text="(검출된 객체 없음)", foreground="gray").pack(pady=20)
+            return
+        
+        # track_id별 버튼 생성
+        for track_id in sorted(computed_targets.keys()):
+            pan, tilt = computed_targets[track_id]
+            
+            btn_frame = ttk.Frame(self.track_buttons_frame)
+            btn_frame.pack(fill="x", padx=5, pady=3)
+            
+            # Track 정보 라벨
+            info_text = f"Track {track_id}: Pan={pan}°, Tilt={tilt}°"
+            ttk.Label(btn_frame, text=info_text, width=35).pack(side="left", padx=5)
+            
+            # Move 버튼
+            ttk.Button(
+                btn_frame, 
+                text="Move to Target", 
+                command=lambda tid=track_id: self.move_to_target(tid),
+                width=15
+            ).pack(side="right", padx=5)
+        
+        print(f"[UI] Created {len(computed_targets)} target button(s)")
+    
     def _row(self, parent, r, txt, v1, v2, v3, labels=("Min","Max","Step")):
         Label(parent, text=txt).grid(row=r, column=0, sticky="w", padx=(5,10))
         ttk.Entry(parent, textvariable=v1, width=8).grid(row=r, column=1, sticky="w", padx=2)

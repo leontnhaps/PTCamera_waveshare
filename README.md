@@ -173,7 +173,10 @@ flowchart TD
 > [!IMPORTANT]
 > **디렉토리 구조 안내**  
 > - **`Com/`**: 현재 사용 중인 최신 안정 버전입니다.
-> - **`Com_test/`**: 신규 기능 개발 및 테스트를 위한 개발 버전입니다. 새로운 기능이 검증되면 `Com/`으로 병합됩니다.
+> - **`Com_test/`**: MOT (Multi-Object Tracking) 통합 완료 버전입니다.
+>   - ✅ track_id 기반 다중 객체 자동 추적
+>   - ✅ 객체별 독립 Pointing 계산
+>   - ✅ 동적 UI 버튼 생성 (각 객체별 "Move to Target")
 > - **`Com_1on1_arduino_valtage/`**: 이전 버전(1:1 방식, 아두이노 INA219 전압 읽기 포함). 참고용으로 보관 중입니다.
 
 *   **`Com_main.py` (Main Entry)**
@@ -197,7 +200,13 @@ flowchart TD
     *   광역 스캔(Scanning) 작업을 관리합니다.
     *   설정된 범위에 따라 Pan/Tilt 격자 좌표를 생성하고, 수신된 이미지에 대해 YOLO 추론을 수행합니다.
     *   탐지된 객체 정보를 CSV 파일로 로깅하는 기능을 담당합니다.
-    *   **MOT 기능**: 코사인 유사도 기반으로 객체를 추적하여 여러 프레임에서 동일 객체를 식별합니다.
+    *   **MOT 통합** (`Com_test/`): ObjectTracker를 사용하여 스캔 중 각 검출에 track_id를 자동 부여합니다.
+
+*   **`MOT.py` (Multi-Object Tracker)** - `Com_test/` 전용
+    *   **특징 추출**: 11x11 격자 기반 HSV + Grayscale 히스토그램 (5,808차원)
+    *   **추적 알고리즘**: 2단계 글로벌 매칭 (직전 프레임 + 건너뛰기 프레임)
+    *   **코사인 유사도**: 특징 벡터 간 유사도로 동일 객체 식별
+    *   **파라미터화**: ROI 크기 및 grid_size 설정 가능
 
 *   **`image_utils.py` (Image Processing)**
     *   이미지 로드, 저장 및 변환을 담당하는 유틸리티 클래스입니다.
@@ -264,8 +273,12 @@ PTCamera_waveshare/
 │   ├── Com_main.py         # 메인 진입점
 │   └── test.py             # 개발/테스트 진입점 (주로 사용)
 │
-├── Com_test/               # 개발 버전 (신규 기능 테스트)
-│   └── (Com과 동일한 구조)
+├── Com_test/               # MOT 통합 버전
+│   ├── MOT.py             # ✨ Multi-Object Tracker (NEW)
+│   ├── scan_utils.py      # Scan + MOT 통합 (track_id 자동 부여)
+│   ├── pointing_handler.py # track_id별 계산 + move_to_target()
+│   ├── app_ui.py          # 동적 버튼 생성
+│   └── (기타 Com과 동일)
 │
 ├── Com_1on1_arduino_valtage/  # 이전 버전 (참고용)
 │   ├── pv_vi.py            # 아두이노 전압 읽기 모듈
@@ -331,17 +344,24 @@ PTCamera_waveshare/
 > [!NOTE]
 > 다음 항목들은 `Com_test/` 폴더에서 개발 및 테스트 중이며, 검증 완료 후 `Com/`으로 병합될 예정입니다.
 
-### 1. 🎯 자동 Scan-to-Pointing 워크플로우
-**목표**: 시스템 시작 시 자동으로 전체 스캔을 시작하고, MOT를 통해 추적된 객체를 우선순위에 따라 자동으로 조준합니다.
+### 1. ✅ ~~Multi-Object Tracking 통합~~ **(완료)**
 
-- [ ] **자동 스캔 시작**: GUI 실행 시 자동으로 전체 영역 스캔 개시
-- [x] **MOT 기반 우선순위**: 마지막 조준 위치에서 가장 가까운 객체부터 순차 조준
-    - ✅ HSV+Grayscale 히스토그램 기반 코사인 유사도 매칭
-    - ✅ Skip-frame (n-2) 후보 검색으로 검출 놓침 대응
-    - ✅ 양방향 대각선 검색으로 지그재그 스캔 대응
-- [ ] **휴먼 피드백 제거**: 수동 개입 없이 전체 프로세스 자동화
+**목표**: 스캔 중 여러 객체를 자동 추적하고 각 객체별 타겟 위치 계산.
 
-**현재 상태**: MOT 알고리즘 완료 (`Experiments/mot_scan_hsv.py`). 자동 워크플로우 통합 중.
+**완료 항목** (`Com_test/`):
+- [x] **MOT.py 모듈 생성**: HSV+Grayscale 히스토그램 기반 ObjectTracker
+    - ✅ 11x11 격자 기반 특징 추출 (5,808차원)
+    - ✅ 2단계 글로벌 매칭 (직전 + 건너뛰기 프레임)
+    - ✅ 코사인 유사도 기반 객체 식별
+- [x] **scan_utils.py 통합**: 스캔 시 track_id 자동 부여
+- [x] **pointing_handler.py 수정**: track_id별 독립 계산 + move_to_target() 메서드
+- [x] **동적 UI 생성**: 각 객체별 "Move to Target" 버튼
+- [x] **CSV 형식 업데이트**: track_id 컬럼 추가
+- [x] **아두이노 코드 제거**: PV Monitor 제거 (Com_1on1_arduino_valtage로 이동)
+
+**다음 단계**:
+- [ ] **자동 스캔 → Pointing 워크플로우**: GUI 실행 시 자동 스캔 및 순차 조준
+- [ ] **Com/ 병합**: 실제 RX 패널 제작 후 검증 완료 시 안정 버전으로 통합
 
 ### 2. ✅ ~~YOLOv11n Nested Object Detection 개선~~ **(완료)**
 **문제**: 작은 객체가 큰 객체 내부에서 중복 탐지되는 현상 발생.

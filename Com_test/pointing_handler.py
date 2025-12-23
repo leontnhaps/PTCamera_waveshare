@@ -355,9 +355,21 @@ class PointingHandlerMixin:
                     cx = float(d["cx"]); cy = float(d["cy"])
                     W  = int(d["W"]) if d.get("W") else None
                     H  = int(d["H"]) if d.get("H") else None
+                    
+                    # ⭐ track_id 파싱 (기본값 0)
+                    track_id = int(d.get("track_id", 0))
+                    
                     if W_frame is None and W: W_frame = W
                     if H_frame is None and H: H_frame = H
-                    rows.append((pan, tilt, cx, cy))
+                    
+                    # ⭐ track_id 포함하여 저장 (튜플 → 딕셔너리)
+                    rows.append({
+                        'track_id': track_id,
+                        'pan': pan,
+                        'tilt': tilt,
+                        'cx': cx,
+                        'cy': cy
+                    })
 
             if not rows:
                 ui_q.put(("toast", "CSV에서 조건을 만족하는 행이 없습니다. conf/min_samples 확인."))
@@ -366,12 +378,25 @@ class PointingHandlerMixin:
                 ui_q.put(("toast", "CSV에 W/H 정보가 없습니다. (W,H 열 필요)"))
                 return
 
-            # --- tilt별 수평 피팅: cx vs pan
+            # ⭐⭐⭐ track_id별로 그룹화 ⭐⭐⭐
             from collections import defaultdict
-            # ---- tilt별: cx = a*pan + b → pan_center = (W/2 - b)/a
-            by_tilt = defaultdict(list)
-            for pan, tilt, cx, cy in rows:
-                by_tilt[round(tilt, 3)].append((pan, cx))
+            grouped_by_track = defaultdict(list)
+            for row in rows:
+                grouped_by_track[row['track_id']].append(row)
+            
+            print(f"[Pointing] Found {len(grouped_by_track)} track(s): {list(grouped_by_track.keys())}")
+            
+            # ⭐ 각 track_id별로 독립적으로 계산
+            self.computed_targets = {}  # {track_id: (pan, tilt)}
+            
+            for track_id, track_rows in grouped_by_track.items():
+                print(f"[Pointing] Computing track_id={track_id} ({len(track_rows)} detections)")
+                
+                # --- tilt별 수평 피팅: cx vs pan
+                # ---- tilt별: cx = a*pan + b → pan_center = (W/2 - b)/a
+                by_tilt = defaultdict(list)
+                for row in track_rows:
+                    by_tilt[round(row['tilt'], 3)].append((row['pan'], row['cx']))
 
             fits_h = {}  # tilt -> dict
             for tkey, arr in by_tilt.items():
@@ -394,35 +419,52 @@ class PointingHandlerMixin:
                 }
 
             # ---- pan별: cy = e*tilt + f → tilt_center = (H/2 - f)/e
-            by_pan = defaultdict(list)
-            for pan, tilt, cx, cy in rows:
-                by_pan[round(pan, 3)].append((tilt, cy))
+                by_pan = defaultdict(list)
+                for row in track_rows:
+                    by_pan[round(row['pan'], 3)].append((row['tilt'], row['cy']))
 
-            fits_v = {}  # pan -> dict
-            for pkey, arr in by_pan.items():
-                if len(arr) < min_samples:
-                    continue
-                arr.sort(key=lambda v: v[0])
-                tilts = np.array([t for t,_ in arr], float)
-                cys   = np.array([c for _,c in arr], float)
-                A = np.vstack([tilts, np.ones_like(tilts)]).T
-                e, f = np.linalg.lstsq(A, cys, rcond=None)[0]
-                yhat = e*tilts + f
-                ss_res = float(np.sum((cys - yhat)**2))
-                ss_tot = float(np.sum((cys - np.mean(cys))**2)) + 1e-9
-                R2 = 1.0 - ss_res/ss_tot
-                tilt_center = (H_frame/2.0 - f)/e if abs(e) > 1e-9 else np.nan
-                fits_v[float(pkey)] = {
-                    "e": float(e), "f": float(f), "R2": float(R2),
-                    "N": int(len(arr)), "tilt_center": float(tilt_center),
-                }
+                fits_v = {}  # pan -> dict
+                for pkey, arr in by_pan.items():
+                    if len(arr) < min_samples:
+                        continue
+                    arr.sort(key=lambda v: v[0])
+                    tilts = np.array([t for t,_ in arr], float)
+                    cys   = np.array([c for _,c in arr], float)
+                    A = np.vstack([tilts, np.ones_like(tilts)]).T
+                    e, f = np.linalg.lstsq(A, cys, rcond=None)[0]
+                    yhat = e*tilts + f
+                    ss_res = float(np.sum((cys - yhat)**2))
+                    ss_tot = float(np.sum((cys - np.mean(cys))**2)) + 1e-9
+                    R2 = 1.0 - ss_res/ss_tot
+                    tilt_center = (H_frame/2.0 - f)/e if abs(e) > 1e-9 else np.nan
+                    fits_v[float(pkey)] = {
+                        "e": float(e), "f": float(f), "R2": float(R2),
+                        "N": int(len(arr)), "tilt_center": float(tilt_center),
+                    }
 
-            # ---- 전역 저장 (센터링/보간에서 사용)
+                # ---- 가중평균 타깃 계산
+                def wavg_center(fits: dict, center_key: str):
+                    if not fits: return None
+                    vals = np.array([fits[k][center_key] for k in fits], float)
+                    w    = np.array([fits[k]["N"]          for k in fits], float)
+                    return float(np.sum(vals*w)/np.sum(w))
+
+                pan_target  = wavg_center(fits_h, "pan_center")
+                tilt_target = wavg_center(fits_v, "tilt_center")
+                
+                # ⭐ track_id별 결과 저장
+                if pan_target is not None and tilt_target is not None:
+                    self.computed_targets[track_id] = (round(pan_target, 3), round(tilt_target, 3))
+                    print(f"[Pointing] track_id={track_id} → pan={pan_target:.3f}°, tilt={tilt_target:.3f}° (H fits: {len(fits_h)}, V fits: {len(fits_v)})")
+                else:
+                    print(f"[Pointing] track_id={track_id} → 계산 실패 (insufficient data)")
+            
+            # ⭐ 전역 저장 (마지막 track의 fits, 센터링/보간에서 사용)
             self._fits_h = fits_h
             self._fits_v = fits_v
 
             # ---- [NEW] 역산값 (Gain) 계산: 1 / mean_slope (px/deg)
-            # 가중 평균 slope 계산
+            # 가중 평균 slope 계산 (모든 track 통합)
             sum_a_w = sum(d['a'] * d['N'] for d in fits_h.values())
             sum_w_h = sum(d['N'] for d in fits_h.values())
             avg_a = sum_a_w / sum_w_h if sum_w_h > 0 else 0.0
@@ -432,7 +474,6 @@ class PointingHandlerMixin:
             avg_e = sum_e_w / sum_w_v if sum_w_v > 0 else 0.0
 
             # Slope(px/deg) 역수 -> deg/px
-            # 분모가 0이거나 너무 작으면 기본값 사용 등의 처리가 필요하겠지만 일단 계산
             if abs(avg_a) > 1e-9:
                 self._computed_gain_pan = abs(1.0 / avg_a)
             else:
@@ -445,28 +486,36 @@ class PointingHandlerMixin:
 
             ui_q.put(("toast", f"[Gain 역산] P: {self._computed_gain_pan}, T: {self._computed_gain_tilt}"))
 
-            # ---- (기존처럼) 가중평균 타깃 계산해서 UI에 표시
-            def wavg_center(fits: dict, center_key: str):
-                if not fits: return None
-                vals = np.array([fits[k][center_key] for k in fits], float)
-                w    = np.array([fits[k]["N"]          for k in fits], float)
-                return float(np.sum(vals*w)/np.sum(w))
+            # ---- 기존 UI 업데이트 (첫 번째 track 사용)
+            if self.computed_targets:
+                first_track_id = list(self.computed_targets.keys())[0]
+                first_pan, first_tilt = self.computed_targets[first_track_id]
+                self.point_pan_target.set(first_pan)
+                self.point_tilt_target.set(first_tilt)
+                
+                result_text = f"Found {len(self.computed_targets)} object(s)\\n"
+                for tid, (p, t) in self.computed_targets.items():
+                    result_text += f"Track {tid}: Pan={p}°, Tilt={t}°\\n"
+                self.point_result_lbl.config(text=result_text)
+                
+                ui_q.put(("toast",
+                    f"[Pointing] {len(self.computed_targets)} object(s) computed"))
+                
+                # ⭐ UI 버튼 업데이트
+                if hasattr(self, '_create_target_buttons'):
+                    self._create_target_buttons(self.computed_targets)
+            else:
+                ui_q.put(("toast", "[Pointing] No targets computed"))
+                if hasattr(self, '_create_target_buttons'):
+                    self._create_target_buttons({})
 
-            pan_target  = wavg_center(fits_h, "pan_center")
-            tilt_target = wavg_center(fits_v, "tilt_center")
-            if pan_target is not None:  self.point_pan_target.set(round(pan_target, 3))
-            if tilt_target is not None: self.point_tilt_target.set(round(tilt_target, 3))
-            result_text = f"Pan: {self.point_pan_target.get()}°, Tilt: {self.point_tilt_target.get()}°\n(H fits: {len(fits_h)}, V fits: {len(fits_v)})"
-            self.point_result_lbl.config(text=result_text)
-            ui_q.put(("toast",
-                f"[Pointing] pan={self.point_pan_target.get()}°, "
-                f"tilt={self.point_tilt_target.get()}°  "
-                f"(fits: H={len(fits_h)}, V={len(fits_v)})"))
+
 
         except Exception as e:
             ui_q.put(("toast", f"[Pointing] 계산 실패: {e}"))
 
     def pointing_move(self):
+        """기존 pointing_move - 첫 번째 track으로 이동"""
         try:
             pan_t  = float(self.point_pan_target.get())
             tilt_t = float(self.point_tilt_target.get())
@@ -481,3 +530,25 @@ class PointingHandlerMixin:
         # 이동
         self.ctrl.send({"cmd":"move","pan":pan_t,"tilt":tilt_t,"speed":spd,"acc":acc})
         ui_q.put(("toast", f"→ Move to (pan={pan_t}°, tilt={tilt_t}°)"))
+    
+    def move_to_target(self, track_id):
+        """
+        특정 track_id의 계산된 pan/tilt로 카메라 이동
+        
+        Args:
+            track_id: 이동할 track의 ID
+        """
+        if not hasattr(self, 'computed_targets') or track_id not in self.computed_targets:
+            ui_q.put(("toast", f"❌ Track {track_id} 타깃 없음. 먼저 계산하세요."))
+            return
+        
+        pan_t, tilt_t = self.computed_targets[track_id]
+        spd = int(100); acc = float(1.0)
+        
+        # 현재 명령 각도 기억
+        self._curr_pan, self._curr_tilt = pan_t, tilt_t
+        
+        # 이동
+        self.ctrl.send({"cmd":"move","pan":pan_t,"tilt":tilt_t,"speed":spd,"acc":acc})
+        ui_q.put(("toast", f"→ Track {track_id}: Move to (pan={pan_t}°, tilt={tilt_t}°)"))
+
