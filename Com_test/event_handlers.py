@@ -21,9 +21,7 @@ class EventHandlersMixin:
         """Main event loop - check triggers and process events"""
         self._check_pointing_trigger()
         
-        # Update PV status (check laser & throttle UI)
-        if hasattr(self, 'pv_monitoring') and self.pv_monitoring.get():
-            self._check_pv_status()
+        # PV status 체크 제거됨 (아두이노)
         
         try:
             while True:

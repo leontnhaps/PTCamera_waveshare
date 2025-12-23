@@ -9,16 +9,7 @@ import tkinter as tk
 from gui_parts import ScrollFrame
 import pathlib
 
-# Optional matplotlib for PV monitoring
-try:
-    import matplotlib
-    matplotlib.use('TkAgg')
-    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-    from matplotlib.figure import Figure
-    MATPLOTLIB_AVAILABLE = True
-except ImportError:
-    MATPLOTLIB_AVAILABLE = False
-    print("[WARNING] matplotlib not installed. PV Monitor tab will be disabled.")
+# matplotlib 제거됨 (아두이노 PV Monitor)
 
 class AppUIMixin:
     """GUI layout and widget initialization"""
@@ -29,7 +20,7 @@ class AppUIMixin:
         self._setup_manual_tab()
         self._setup_misc_tab()
         self._setup_pointing_tab()
-        self._setup_pv_tab()
+        # _setup_pv_tab() 제거됨 (아두이노)
     
     def _setup_scan_tab(self):
         for i in range(self.notebook.index("end")):
@@ -190,8 +181,73 @@ class AppUIMixin:
         self.debug_preview_label = Label(debug_frame, bg="#111", fg="#666", text="(Waiting for detection...)")
         self.debug_preview_label.pack(fill="both", expand=True, padx=10, pady=10)
     
-    def _setup_pv_tab(self):
-        """PV Monitor Tab Layout"""
+    # ========== PV Monitor Tab 제거됨 (아두이노 전압 측정) ==========
+    # _setup_pv_tab() 메서드 및 모든 관련 코드 제거됨
+    
+    # Helper methods for UI creation
+    def _row(self, parent, r, txt, v1, v2, v3, labels=("Min","Max","Step")):
+        Label(parent, text=txt).grid(row=r, column=0, sticky="w", padx=(5,10))
+        ttk.Entry(parent, textvariable=v1, width=8).grid(row=r, column=1, sticky="w", padx=2)
+        Label(parent, text=labels[0], font=("", 8)).grid(row=r, column=1, sticky="e", padx=2)
+        ttk.Entry(parent, textvariable=v2, width=8).grid(row=r, column=2, sticky="w", padx=2)
+        Label(parent, text=labels[1], font=("", 8)).grid(row=r, column=2, sticky="e", padx=2)
+        if v3 is not None:
+            ttk.Entry(parent, textvariable=v3, width=8).grid(row=r, column=3, sticky="w", padx=2)
+            Label(parent, text=labels[2], font=("", 8)).grid(row=r, column=3, sticky="e", padx=2)
+    
+    def _entry(self, parent, r, txt, var):
+        Label(parent, text=txt).grid(row=r, column=0, sticky="w", padx=(5,10))
+        ttk.Entry(parent, textvariable=var, width=12).grid(row=r, column=1, sticky="w", padx=2)
+    
+    def _slider(self, parent, r, txt, mi, ma, var, res):
+        Label(parent, text=txt).grid(row=r, column=0, sticky="w", padx=5)
+        Scale(parent, from_=mi, to=ma, orient=HORIZONTAL, resolution=res, length=250,
+              variable=var).grid(row=r, column=1, sticky="w", padx=5)
+    
+    def _send_snap_cmd(self, save_name):
+        self.ctrl.send({
+            "cmd": "snap",
+            "width": self.width.get(),
+            "height": self.height.get(),
+            "quality": self.quality.get(),
+            "save": save_name,
+            "ud_save": self.ud_save_copy.get()
+        })
+    
+    def _undistort_pair(self, img_on, img_off):
+        """Undistort a pair of images"""
+        self.image_processor.alpha = float(self.ud_alpha.get())
+        img_on_ud = self.image_processor.undistort(img_on, use_torch=True)
+        img_off_ud = self.image_processor.undistort(img_off, use_torch=True)
+        return img_on_ud, img_off_ud
+    
+    def _get_yolo_model(self):
+        path = self.yolo_wpath.get()
+        if not path or not pathlib.Path(path).exists():
+            return None
+        return self.yolo_processor.get_model(path)
+    
+    def _get_device(self):
+        return self.yolo_processor.get_device()
+    
+    def _calculate_angle_delta(self, err_x, err_y, k_pan=None, k_tilt=None, force_max_step=None):
+        """Calculate angle delta from pixel error"""
+        # Default gains
+        if k_pan is None:
+            k_pan = 0.02
+        if k_tilt is None:
+            k_tilt = 0.02
+        
+        d_pan = err_x * k_pan
+        d_tilt = err_y * k_tilt
+        
+        # Apply max step limit
+        max_step = force_max_step if force_max_step is not None else self.pointing_max_step.get()
+        d_pan = max(-max_step, min(max_step, d_pan))
+        d_tilt = max(-max_step, min(max_step, d_tilt))
+        
+        return d_pan, d_tilt
+
         # Find or create PV tab
         pv_tab = None
         for i in range(self.notebook.index("end")):

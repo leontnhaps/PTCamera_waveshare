@@ -12,10 +12,21 @@ import pathlib
 import threading
 import queue
 
+# MOT Tracker
+from MOT import ObjectTracker
+
 class ScanController:
     """실시간 스캔 처리 관리자 - Worker Thread pattern for async processing"""
     
-    def __init__(self, image_processor, yolo_processor, output_dir):
+    def __init__(self, image_processor, yolo_processor, output_dir, mot_roi_size=300, mot_grid_size=(11, 11)):
+        """
+        Args:
+            image_processor: 이미지 처리 객체
+            yolo_processor: YOLO 모델 프로세서
+            output_dir: 출력 디렉토리
+            mot_roi_size: MOT ROI 크기 (픽셀, 중심 기준)
+            mot_grid_size: MOT 특징 추출 격자 크기 (rows, cols)
+        """
         self.image_processor = image_processor
         self.yolo_processor = yolo_processor
         self.output_dir = output_dir
@@ -23,6 +34,9 @@ class ScanController:
         # Scan state
         self.is_scanning = False
         self.yolo_weights_path = None
+        
+        # ⭐ MOT Tracker (설정 가능한 파라미터)
+        self.mot_tracker = ObjectTracker(roi_size=mot_roi_size, grid_size=mot_grid_size)
         
         # Real-time processing buffer: (pan, tilt) -> {'on': img, 'off': img}
         self.image_pairs = {}
@@ -77,11 +91,15 @@ class ScanController:
         self.detected_count = 0
         self._start_worker_thread()
         
+        # ⭐ MOT Tracker 초기화
+        self.mot_tracker.reset()
+        
         self.csv_path = self.output_dir / f"{session_name}_detections.csv"
         try:
             self.csv_file = open(self.csv_path, "w", newline="", encoding="utf-8")
             self.csv_writer = csv.writer(self.csv_file)
-            self.csv_writer.writerow(["pan_deg", "tilt_deg", "cx", "cy", "w", "h", "conf", "cls", "W", "H"])
+            # ⭐ track_id 컬럼 추가
+            self.csv_writer.writerow(["pan_deg", "tilt_deg", "cx", "cy", "w", "h", "conf", "cls", "track_id", "W", "H"])
             print(f"[ScanController] CSV created: {self.csv_path}")
             return True
         except Exception as e:
@@ -137,6 +155,11 @@ class ScanController:
     def _process_pair(self, pan, tilt, pair):
         """Worker Thread 내부에서 실행됨"""
         from yolo_utils import predict_with_tiling
+        from datetime import datetime
+        
+        # ⭐ 타임스탬프 생성 (MOT용)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+        
         # YOLO constants
         YOLO_TILE_ROWS = 2
         YOLO_TILE_COLS = 3
@@ -167,11 +190,20 @@ class ScanController:
                 device=device
             )
             
+            # ⭐ MOT 추적 - track_id 부여
+            if boxes:
+                track_ids = self.mot_tracker.add_detections(
+                    boxes, scores, img_on_ud, diff, pan, tilt, timestamp
+                )
+            else:
+                track_ids = []
+            
+            # CSV 저장 (track_id 포함)
             if boxes and self.csv_writer:
                 for i, (x, y, w, h) in enumerate(boxes):
                     self.csv_writer.writerow([
                         pan, tilt, x+w/2, y+h/2, w, h,
-                        float(scores[i]), int(classes[i]), W, H
+                        float(scores[i]), int(classes[i]), track_ids[i], W, H
                     ])
                     self.detected_count += 1
                 self.csv_file.flush()
