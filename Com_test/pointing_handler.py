@@ -398,27 +398,27 @@ class PointingHandlerMixin:
                 for row in track_rows:
                     by_tilt[round(row['tilt'], 3)].append((row['pan'], row['cx']))
 
-            fits_h = {}  # tilt -> dict
-            for tkey, arr in by_tilt.items():
-                if len(arr) < min_samples: 
-                    continue
-                arr.sort(key=lambda v: v[0])
-                pans = np.array([p for p,_ in arr], float)
-                cxs  = np.array([c for _,c in arr], float)
-                A = np.vstack([pans, np.ones_like(pans)]).T
-                a, b = np.linalg.lstsq(A, cxs, rcond=None)[0]
-                # R^2
-                yhat = a*pans + b
-                ss_res = float(np.sum((cxs - yhat)**2))
-                ss_tot = float(np.sum((cxs - np.mean(cxs))**2)) + 1e-9
-                R2 = 1.0 - ss_res/ss_tot
-                pan_center = (W_frame/2.0 - b)/a if abs(a) > 1e-9 else np.nan
-                fits_h[float(tkey)] = {
-                    "a": float(a), "b": float(b), "R2": float(R2),
-                    "N": int(len(arr)), "pan_center": float(pan_center),
-                }
+                fits_h = {}  # tilt -> dict
+                for tkey, arr in by_tilt.items():
+                    if len(arr) < min_samples: 
+                        continue
+                    arr.sort(key=lambda v: v[0])
+                    pans = np.array([p for p,_ in arr], float)
+                    cxs  = np.array([c for _,c in arr], float)
+                    A = np.vstack([pans, np.ones_like(pans)]).T
+                    a, b = np.linalg.lstsq(A, cxs, rcond=None)[0]
+                    # R^2
+                    yhat = a*pans + b
+                    ss_res = float(np.sum((cxs - yhat)**2))
+                    ss_tot = float(np.sum((cxs - np.mean(cxs))**2)) + 1e-9
+                    R2 = 1.0 - ss_res/ss_tot
+                    pan_center = (W_frame/2.0 - b)/a if abs(a) > 1e-9 else np.nan
+                    fits_h[float(tkey)] = {
+                        "a": float(a), "b": float(b), "R2": float(R2),
+                        "N": int(len(arr)), "pan_center": float(pan_center),
+                    }
 
-            # ---- pan별: cy = e*tilt + f → tilt_center = (H/2 - f)/e
+                # ---- pan별: cy = e*tilt + f → tilt_center = (H/2 - f)/e
                 by_pan = defaultdict(list)
                 for row in track_rows:
                     by_pan[round(row['pan'], 3)].append((row['tilt'], row['cy']))

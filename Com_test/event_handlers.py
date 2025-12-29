@@ -337,7 +337,7 @@ class EventHandlersMixin:
         
         new_w = int(im_w * scale)
         new_h = int(im_h * scale)
-        im_resized = im.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        im_resized = im.resize((new_w, new_h), Image.Resampling.BILINEAR)
         
         photo = ImageTk.PhotoImage(im_resized)
         self.preview_label.config(image=photo)
@@ -353,7 +353,7 @@ class EventHandlersMixin:
             im = Image.fromarray(rgb)
             
             # Resize to fit 400x400 frame
-            im_resized = im.resize((400, 400), Image.Resampling.LANCZOS)
+            im_resized = im.resize((400, 400), Image.Resampling.BILINEAR)
             
             photo = ImageTk.PhotoImage(im_resized)
             self.debug_preview_label.config(image=photo)
