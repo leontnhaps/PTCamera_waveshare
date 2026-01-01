@@ -44,39 +44,34 @@ def show_laser_coordinates(image_path_1, image_path_2, roi_size=800):
     img_roi_vis = img2_roi.copy()
 
     # --- 3. 이미지 처리 (Diff & Threshold) ---
-    gray1 = cv2.cvtColor(img1_roi, cv2.COLOR_BGR2GRAY)
-    gray2 = cv2.cvtColor(img2_roi, cv2.COLOR_BGR2GRAY)
-    gray1 = cv2.GaussianBlur(gray1, (5, 5), 0)
-    gray2 = cv2.GaussianBlur(gray2, (5, 5), 0)
+    # Com_test 방식: 블러 없이 Diff 계산
+    diff_roi = cv2.absdiff(img2_roi, img1_roi)
     
-    diff_roi = cv2.absdiff(gray1, gray2)
-    _, binary_diff_roi = cv2.threshold(diff_roi, 30, 255, cv2.THRESH_BINARY)
+    # Convert to grayscale
+    gray = cv2.cvtColor(diff_roi, cv2.COLOR_BGR2GRAY)
+    
+    # Com_test 방식: THRESH_TOZERO with threshold 70
+    cv_thresh = 70
+    _, binary_diff_roi = cv2.threshold(gray, cv_thresh, 255, cv2.THRESH_TOZERO)
 
     # --- 4. 레이저 중심 좌표 찾기 (Moments) ---
-    # 흰색 덩어리(Contour)를 찾습니다.
-    contours, _ = cv2.findContours(binary_diff_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
+    # Com_test 방식: Contour 없이 전체 이미지에서 moments 직접 계산
+    M = cv2.moments(binary_diff_roi)
+    
     laser_detected = False
     cx, cy = 0, 0 # ROI 내 좌표
     gx, gy = 0, 0 # 전체 좌표 (Global)
 
-    if contours:
-        # 가장 큰 덩어리를 레이저로 간주 (노이즈 제거 효과)
-        largest_contour = max(contours, key=cv2.contourArea)
+    # 무게 중심 계산 (분모가 0이 아닐 때만)
+    if M["m00"] != 0:
+        cx = int(M["m10"] / M["m00"])
+        cy = int(M["m01"] / M["m00"])
         
-        # 모멘트 계산
-        M = cv2.moments(largest_contour)
+        # 📍 좌표 변환: ROI 좌표 -> 전체 좌표
+        gx = cx + x1
+        gy = cy + y1
         
-        # 무게 중심 계산 (분모가 0이 아닐 때만)
-        if M["m00"] != 0:
-            cx = int(M["m10"] / M["m00"])
-            cy = int(M["m01"] / M["m00"])
-            
-            # 📍 좌표 변환: ROI 좌표 -> 전체 좌표
-            gx = cx + x1
-            gy = cy + y1
-            
-            laser_detected = True
+        laser_detected = True
 
     # --- 5. 시각화 (좌표 찍기) ---
     if laser_detected:
@@ -123,7 +118,7 @@ def show_laser_coordinates(image_path_1, image_path_2, roi_size=800):
 
 # --- 실행 ---
 show_laser_coordinates(
-    'C:/Users/gmlwn/OneDrive/바탕 화면/레이저필터데이터셋/captures_gui_20251126_203956/snap_20251126_204715_ud.jpg',
-    'C:/Users/gmlwn/OneDrive/바탕 화면/레이저필터데이터셋/captures_gui_20251126_203956/snap_20251126_204724_ud.jpg',
-    roi_size=200
+    r'c:\Users\gmlwn\OneDrive\바탕 화면\ICon1학년\OpticalWPT\추계 이후자료\레이저 HSV 확인용\captures_gui_20251126_203956\snap_20251126_204724_ud.jpg',
+    r'c:\Users\gmlwn\OneDrive\바탕 화면\ICon1학년\OpticalWPT\추계 이후자료\레이저 HSV 확인용\captures_gui_20251126_203956\snap_20251126_204715_ud.jpg',
+    roi_size=400
 )

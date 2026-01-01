@@ -84,47 +84,47 @@ def visualize_sahi_tiling(img, rows=2, cols=3, overlap=0.25):
             text_x = cx - text_size[0] // 2
             text_y = cy + text_size[1] // 2
             
-            # 텍스트 배경
-            cv2.rectangle(vis_img, 
-                         (text_x - 10, text_y - text_size[1] - 10),
-                         (text_x + text_size[0] + 10, text_y + 10),
-                         (0, 0, 0), -1)
+            # # 텍스트 배경
+            # cv2.rectangle(vis_img, 
+            #              (text_x - 10, text_y - text_size[1] - 10),
+            #              (text_x + text_size[0] + 10, text_y + 10),
+            #              (0, 0, 0), -1)
             
             # 텍스트
-            cv2.putText(vis_img, text, (text_x, text_y), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 3)
+            #cv2.putText(vis_img, text, (text_x, text_y), 
+            #           cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 3)
             
             # 타일 크기 정보
             size_text = f"{x2-x1}x{y2-y1}"
-            cv2.putText(vis_img, size_text, (x1 + 10, y1 + 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+            #cv2.putText(vis_img, size_text, (x1 + 10, y1 + 30), 
+            #           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
             
             tile_num += 1
             
             if x2 >= W: break
         if y2 >= H: break
     
-    # 이미지 정보 오버레이
-    info_text = [
-        f"Image Size: {W}x{H}",
-        f"Grid: {rows}x{cols}",
-        f"Overlap: {overlap*100:.0f}%",
-        f"Tile Size: ~{tile_w}x{tile_h}",
-        f"Total Tiles: {len(tiles)}"
-    ]
+    # # 이미지 정보 오버레이
+    # info_text = [
+    #     f"Image Size: {W}x{H}",
+    #     f"Grid: {rows}x{cols}",
+    #     f"Overlap: {overlap*100:.0f}%",
+    #     f"Tile Size: ~{tile_w}x{tile_h}",
+    #     f"Total Tiles: {len(tiles)}"
+    # ]
     
-    y_offset = 30
-    for i, text in enumerate(info_text):
-        # 배경
-        text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0]
-        cv2.rectangle(vis_img, 
-                     (10, y_offset - 25 + i*35),
-                     (text_size[0] + 20, y_offset + 10 + i*35),
-                     (0, 0, 0), -1)
+    # y_offset = 30
+    # for i, text in enumerate(info_text):
+    #     # 배경
+    #     text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0]
+    #     cv2.rectangle(vis_img, 
+    #                  (10, y_offset - 25 + i*35),
+    #                  (text_size[0] + 20, y_offset + 10 + i*35),
+    #                  (0, 0, 0), -1)
         
-        # 텍스트
-        cv2.putText(vis_img, text, (15, y_offset + i*35), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+    #     # 텍스트
+    #     cv2.putText(vis_img, text, (15, y_offset + i*35), 
+    #                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
     
     return vis_img, tiles
 
@@ -166,7 +166,7 @@ def main():
     # 타일링 설정
     rows = 2
     cols = 3
-    overlap = 0.25
+    overlap = 0.15
 
     # 처리
     count = 0
