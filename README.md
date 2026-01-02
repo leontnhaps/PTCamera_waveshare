@@ -244,16 +244,30 @@ PC와 라즈베리파이 간의 통신을 중계합니다.
     *   **Non-blocking**: 클라이언트의 비정상 종료 시에도 서버가 멈추지 않도록 타임아웃 및 예외 처리 로직이 강화되었습니다.
 
 
-### 4. 🔌 Arduino (`Arduino/`)
-수신부에서 배터리 전압을 모니터링하고 LED로 상태를 시각화합니다.
+### 4. 🔌 수신부 (RX, Receiver)
+수신부 하드웨어 설계 및 배터리 모니터링 시스템입니다.
 
-*   **`Nano_LED.ino` (Battery Monitor & LED Indicator)**
+#### 📁 `RX/Arduino/` - 아두이노 펌웨어
+
+*   **`Nano_LED/Nano_LED.ino` (Main - Battery Monitor & LED Indicator)**
     *   **전압 모니터링**: A0 핀으로 배터리 전압을 측정합니다 (10회 평균으로 노이즈 제거).
     *   **RGB LED 상태 표시**:
         - 🔴 **빨간색** (`<3.7V`): 배터리 부족 - 충전 필요
         - 🟢 **녹색** (`3.7V~4.0V`): 정상 배터리 상태
         - 🔵 **파란색** (`≥4.0V`): 충전 완료 또는 충전 중
     *   **시리얼 출력**: 디버깅 및 보정을 위해 전압값을 Serial Monitor로 출력합니다.
+
+*   **`INA219/INA219.ino` (레거시 - INA219 전압센서)**
+    *   INA219 센서를 사용한 고정밀 전압 측정 코드 (참고용).
+
+*   **`Mini_LED/Mini_LED.ino` (간이 버전)**
+    *   단순화된 LED 표시 코드 (테스트 및 디버깅용).
+
+#### 🖨️ 3D 모델 파일
+
+*   **`Target.stl`**: 수신부 타겟 3D 모델 (STL 형식)
+*   **`Target.3mf`**: 3D 프린팅용 프로젝트 파일
+*   **`Target.gcode.3mf`**: G-code가 포함된 프린트 준비 파일
 
 ---
 
@@ -290,9 +304,17 @@ PTCamera_waveshare/
 ├── Server/                 # 중계 서버
 │   └── Server_main.py      # 소켓 브로커
 │
-├── Arduino/                # 수신부 아두이노
-│   ├── Nano_LED.ino        # 배터리 모니터 및 RGB LED
-│   └── INA219/             # (레거시) INA219 전압센서 코드
+├── RX/                     # 🔌 수신부 (Receiver)
+│   ├── Arduino/            # 아두이노 펌웨어
+│   │   ├── Nano_LED/       # ✨ 메인 - 배터리 모니터 및 RGB LED
+│   │   │   └── Nano_LED.ino
+│   │   ├── INA219/         # (레거시) INA219 전압센서 코드
+│   │   │   └── INA219.ino
+│   │   └── Mini_LED/       # 간이 버전 (테스트용)
+│   │       └── Mini_LED.ino
+│   ├── Target.stl          # 3D 모델 - STL 형식
+│   ├── Target.3mf          # 3D 프린팅 프로젝트 파일
+│   └── Target.gcode.3mf    # G-code 포함 프린트 파일
 │
 ├── Experiments/            # 실험 및 테스트 스크립트
 │   ├── yolo_utils.py       # YOLO 래핑 (IoMin NMS 포함)
