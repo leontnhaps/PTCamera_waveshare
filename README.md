@@ -341,9 +341,14 @@ PTCamera_waveshare/
 │   ├── diff_filter_red_yellow.py  # 빨강+노랑 복합
 │   ├── diff_filter_1_2.py  # 비율 필터링 (1:2)
 │   │
-│   ├── # 레이저 감지 실험
+│   ├── # 레이저 및 LED 감지 실험
 │   ├── diff_laser.py       # Diff 기반 레이저 중심 감지
 │   ├── diff_laser_hsv.py   # HSV + Diff 레이저 감지
+│   ├── led_filter_test.py  # 🔵 대화형 LED 필터 테스트 도구
+│   │                       # - 파일 다이얼로그로 이미지 선택
+│   │                       # - 클릭으로 100x100 ROI 설정
+│   │                       # - 트랙바로 HSV 파라미터 실시간 조절
+│   │                       # - 파란색 LED 검출 및 중심 좌표 계산
 │   ├── Laser_GPIO.py       # 라즈베리파이 레이저 GPIO 제어
 │   │
 │   ├── # 유틸리티
